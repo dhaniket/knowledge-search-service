@@ -19,6 +19,9 @@ from app.cache.redis import (
 from app.search.elasticsearch import (
     check_elasticsearch_connection,
 )
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -28,9 +31,27 @@ async def lifespan(
 
     check_database_connection()
 
-    check_elasticsearch_connection()
+    try:
 
-    check_redis_connection()
+        check_elasticsearch_connection()
+
+    except Exception:
+
+        logger.warning(
+            "Elasticsearch unavailable " "during startup",
+            exc_info=True,
+        )
+
+    try:
+
+        check_redis_connection()
+
+    except Exception:
+
+        logger.warning(
+            "Redis unavailable " "during startup",
+            exc_info=True,
+        )
 
     yield
 

@@ -5,27 +5,19 @@ from fastapi import (
     HTTPException,
     Query,
 )
-
-from app.repositories.article_repository import (
-    ArticleRepository,
+from app.api.dependencies import (
+    ArticleServiceDep,
 )
+
 from app.schemas.article import (
     ArticleCreate,
     ArticleResponse,
-)
-from app.services.article_service import (
-    ArticleService,
 )
 
 router = APIRouter(
     prefix="/api/v1/articles",
     tags=["articles"],
 )
-
-
-repository = ArticleRepository()
-
-service = ArticleService(repository)
 
 
 @router.post(
@@ -35,6 +27,7 @@ service = ArticleService(repository)
 )
 def create_article(
     article_data: ArticleCreate,
+    service: ArticleServiceDep,
 ):
 
     return service.create_article(article_data)
@@ -46,6 +39,7 @@ def create_article(
 )
 def get_article(
     article_id: str,
+    service: ArticleServiceDep,
 ):
 
     article = service.get_article(article_id)
@@ -64,6 +58,7 @@ def get_article(
     response_model=list[ArticleResponse],
 )
 def list_articles(
+    service: ArticleServiceDep,
     limit: Annotated[
         int,
         Query(

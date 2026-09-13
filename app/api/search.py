@@ -1,15 +1,17 @@
 from typing import Annotated
 
+
 from fastapi import (
     APIRouter,
+    HTTPException,
     Query,
 )
 
-from app.repositories.article_search_repository import (
-    ArticleSearchRepository,
+from app.errors.search_errors import (
+    SearchUnavailableError,
 )
-from app.repositories.search_cache_repository import (
-    SearchCacheRepository,
+from app.api.dependencies import (
+    SearchServiceDep,
 )
 from app.schemas.search import (
     ArticleSearchResult,
@@ -21,17 +23,6 @@ from app.services.search_service import (
 router = APIRouter(
     prefix="/api/v1/search",
     tags=["search"],
-)
-
-
-search_repository = ArticleSearchRepository()
-
-cache_repository = SearchCacheRepository()
-
-
-service = SearchService(
-    search_repository=search_repository,
-    cache_repository=cache_repository,
 )
 
 
@@ -47,6 +38,7 @@ def search_articles(
             max_length=200,
         ),
     ],
+    service: SearchServiceDep,
     limit: Annotated[
         int,
         Query(
@@ -55,8 +47,16 @@ def search_articles(
         ),
     ] = 10,
 ):
+    try:
 
-    return service.search_articles(
-        query=q,
-        limit=limit,
-    )
+        return service.search_articles(
+            query=q,
+            limit=limit,
+        )
+
+    except SearchUnavailableError:
+
+        raise HTTPException(
+            status_code=503,
+            detail=("Search service " "temporarily unavailable"),
+        )
