@@ -4,9 +4,14 @@ from contextlib import (
 
 from fastapi import FastAPI
 
-from app.api.articles import router
+from app.api.articles import (
+    router as articles_router,
+)
 from app.db.mongodb import (
     check_database_connection,
+)
+from app.api.search import (
+    router as search_router,
 )
 
 
@@ -27,7 +32,8 @@ app = FastAPI(
 )
 
 
-app.include_router(router)
+app.include_router(articles_router)
+app.include_router(search_router)
 
 
 @app.get("/health")
