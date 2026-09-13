@@ -13,6 +13,12 @@ from app.db.mongodb import (
 from app.api.search import (
     router as search_router,
 )
+from app.cache.redis import (
+    check_redis_connection,
+)
+from app.search.elasticsearch import (
+    check_elasticsearch_connection,
+)
 
 
 @asynccontextmanager
@@ -21,6 +27,10 @@ async def lifespan(
 ):
 
     check_database_connection()
+
+    check_elasticsearch_connection()
+
+    check_redis_connection()
 
     yield
 

@@ -8,6 +8,9 @@ from fastapi import (
 from app.repositories.article_search_repository import (
     ArticleSearchRepository,
 )
+from app.repositories.search_cache_repository import (
+    SearchCacheRepository,
+)
 from app.schemas.search import (
     ArticleSearchResult,
 )
@@ -21,9 +24,15 @@ router = APIRouter(
 )
 
 
-repository = ArticleSearchRepository()
+search_repository = ArticleSearchRepository()
 
-service = SearchService(repository)
+cache_repository = SearchCacheRepository()
+
+
+service = SearchService(
+    search_repository=search_repository,
+    cache_repository=cache_repository,
+)
 
 
 @router.get(
