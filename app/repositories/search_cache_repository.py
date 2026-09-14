@@ -1,12 +1,8 @@
 import hashlib
 import json
-
-from app.cache.redis import (
-    get_search_cache_ttl,
-    redis_client,
-)
 import logging
 
+from redis.asyncio import Redis
 from redis.exceptions import (
     RedisError,
 )
@@ -17,6 +13,16 @@ logger = logging.getLogger(__name__)
 class SearchCacheRepository:
 
     CACHE_VERSION = "v1"
+
+    def __init__(
+        self,
+        client: Redis,
+        ttl_seconds: int,
+    ) -> None:
+
+        self.client = client
+
+        self.ttl_seconds = ttl_seconds
 
     @staticmethod
     def _normalize_query(
@@ -37,7 +43,7 @@ class SearchCacheRepository:
 
         return f"search:" f"{self.CACHE_VERSION}:" f"{query_hash}:" f"limit:{limit}"
 
-    def get(
+    async def get(
         self,
         query: str,
         limit: int,
@@ -50,7 +56,7 @@ class SearchCacheRepository:
 
         try:
 
-            cached_value = redis_client.get(key)
+            cached_value = await self.client.get(key)
 
         except RedisError:
 
@@ -64,9 +70,20 @@ class SearchCacheRepository:
         if cached_value is None:
             return None
 
-        return json.loads(cached_value)
+        try:
 
-    def set(
+            return json.loads(cached_value)
+
+        except json.JSONDecodeError:
+
+            logger.warning(
+                "Invalid cached JSON",
+                exc_info=True,
+            )
+
+            return None
+
+    async def set(
         self,
         query: str,
         limit: int,
@@ -80,10 +97,10 @@ class SearchCacheRepository:
 
         try:
 
-            redis_client.set(
+            await self.client.set(
                 key,
                 json.dumps(results),
-                ex=get_search_cache_ttl(),
+                ex=self.ttl_seconds,
             )
 
         except RedisError:
@@ -93,20 +110,7 @@ class SearchCacheRepository:
                 exc_info=True,
             )
 
-    def get_ttl(
-        self,
-        query: str,
-        limit: int,
-    ) -> int:
-
-        key = self._build_key(
-            query=query,
-            limit=limit,
-        )
-
-        return redis_client.ttl(key)
-
-    def clear_all(
+    async def clear_all(
         self,
     ) -> None:
 
@@ -116,7 +120,7 @@ class SearchCacheRepository:
 
             while True:
 
-                cursor, keys = redis_client.scan(
+                cursor, keys = await self.client.scan(
                     cursor=cursor,
                     match="search:*",
                     count=100,
@@ -124,7 +128,7 @@ class SearchCacheRepository:
 
                 if keys:
 
-                    redis_client.delete(*keys)
+                    await self.client.delete(*keys)
 
                 if cursor == 0:
                     break
@@ -135,3 +139,16 @@ class SearchCacheRepository:
                 "Redis cache invalidation " "failed",
                 exc_info=True,
             )
+
+    async def get_ttl(
+        self,
+        query: str,
+        limit: int,
+    ) -> int:
+
+        key = self._build_key(
+            query=query,
+            limit=limit,
+        )
+
+        return await self.client.ttl(key)

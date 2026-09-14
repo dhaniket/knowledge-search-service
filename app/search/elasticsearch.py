@@ -1,9 +1,14 @@
 import os
 
 from dotenv import load_dotenv
-from elasticsearch import Elasticsearch
+from elasticsearch import (
+    AsyncElasticsearch,
+)
 
 load_dotenv()
+
+
+_elasticsearch_client: AsyncElasticsearch | None = None
 
 
 def get_elasticsearch_url() -> str:
@@ -36,12 +41,36 @@ def get_elasticsearch_index() -> str:
     return index_name
 
 
-elasticsearch_client = Elasticsearch(
-    get_elasticsearch_url(),
-    api_key=get_elastic_api_key(),
-)
+async def initialize_elasticsearch() -> None:
+
+    global _elasticsearch_client
+
+    if _elasticsearch_client is None:
+
+        _elasticsearch_client = AsyncElasticsearch(
+            get_elasticsearch_url(),
+            api_key=(get_elastic_api_key()),
+        )
+
+    await _elasticsearch_client.info()
 
 
-def check_elasticsearch_connection() -> None:
+def get_elasticsearch_client() -> AsyncElasticsearch:
 
-    elasticsearch_client.info()
+    if _elasticsearch_client is None:
+
+        raise RuntimeError("Elasticsearch client " "is not initialized")
+
+    return _elasticsearch_client
+
+
+async def close_elasticsearch() -> None:
+
+    global _elasticsearch_client
+
+    if _elasticsearch_client is None:
+        return
+
+    await _elasticsearch_client.close()
+
+    _elasticsearch_client = None

@@ -27,7 +27,7 @@ class FakeArticleRepository:
 
         self.create_call_count = 0
 
-    def create(
+    async def create(
         self,
         article_data: ArticleCreate,
     ) -> KnowledgeArticle:
@@ -50,7 +50,7 @@ class FakeSearchRepository:
 
         self.indexed_article = None
 
-    def index_article(
+    async def index_article(
         self,
         article: KnowledgeArticle,
     ) -> None:
@@ -70,7 +70,7 @@ class FakeCacheRepository:
 
         self.clear_call_count = 0
 
-    def clear_all(
+    async def clear_all(
         self,
     ) -> None:
 
@@ -113,7 +113,8 @@ def article_create() -> ArticleCreate:
     )
 
 
-def test_create_article_saves_indexes_and_clears_cache(
+@pytest.mark.anyio
+async def test_create_article_saves_indexes_and_clears_cache(
     article: KnowledgeArticle,
     article_create: ArticleCreate,
 ) -> None:
@@ -130,7 +131,7 @@ def test_create_article_saves_indexes_and_clears_cache(
         cache_repository=(cache_repository),
     )
 
-    result = service.create_article(article_create)
+    result = await service.create_article(article_create)
 
     assert result == article
 
@@ -143,7 +144,8 @@ def test_create_article_saves_indexes_and_clears_cache(
     assert cache_repository.clear_call_count == 1
 
 
-def test_create_article_still_succeeds_when_elasticsearch_fails(
+@pytest.mark.anyio
+async def test_create_article_still_succeeds_when_elasticsearch_fails(
     article: KnowledgeArticle,
     article_create: ArticleCreate,
 ) -> None:
@@ -160,7 +162,7 @@ def test_create_article_still_succeeds_when_elasticsearch_fails(
         cache_repository=(cache_repository),
     )
 
-    result = service.create_article(article_create)
+    result = await service.create_article(article_create)
 
     assert result == article
 

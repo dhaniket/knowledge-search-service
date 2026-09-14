@@ -1,23 +1,19 @@
 from typing import Annotated
 
-
 from fastapi import (
     APIRouter,
     HTTPException,
     Query,
 )
 
-from app.errors.search_errors import (
-    SearchUnavailableError,
-)
 from app.api.dependencies import (
     SearchServiceDep,
 )
+from app.errors.search_errors import (
+    SearchUnavailableError,
+)
 from app.schemas.search import (
     ArticleSearchResult,
-)
-from app.services.search_service import (
-    SearchService,
 )
 
 router = APIRouter(
@@ -30,7 +26,8 @@ router = APIRouter(
     "",
     response_model=list[ArticleSearchResult],
 )
-def search_articles(
+async def search_articles(
+    service: SearchServiceDep,
     q: Annotated[
         str,
         Query(
@@ -38,7 +35,6 @@ def search_articles(
             max_length=200,
         ),
     ],
-    service: SearchServiceDep,
     limit: Annotated[
         int,
         Query(
@@ -47,9 +43,10 @@ def search_articles(
         ),
     ] = 10,
 ):
+
     try:
 
-        return service.search_articles(
+        return await service.search_articles(
             query=q,
             limit=limit,
         )

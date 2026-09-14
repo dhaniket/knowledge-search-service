@@ -1,14 +1,13 @@
+import logging
+
+from app.errors.search_errors import (
+    SearchIndexSyncError,
+)
 from app.models.article import (
     KnowledgeArticle,
 )
 from app.repositories.article_repository import (
     ArticleRepository,
-)
-from app.schemas.article import (
-    ArticleCreate,
-)
-from app.errors.search_errors import (
-    SearchIndexSyncError,
 )
 from app.repositories.article_search_repository import (
     ArticleSearchRepository,
@@ -16,7 +15,9 @@ from app.repositories.article_search_repository import (
 from app.repositories.search_cache_repository import (
     SearchCacheRepository,
 )
-import logging
+from app.schemas.article import (
+    ArticleCreate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -36,41 +37,42 @@ class ArticleService:
 
         self.cache_repository = cache_repository
 
-    def create_article(
+    async def create_article(
         self,
         article_data: ArticleCreate,
     ) -> KnowledgeArticle:
 
-        article = self.article_repository.create(article_data)
+        article = await self.article_repository.create(article_data)
 
         try:
 
-            self.search_repository.index_article(article)
+            await self.search_repository.index_article(article)
 
         except SearchIndexSyncError:
 
             logger.warning(
                 "Article %s was saved "
                 "to MongoDB but could not "
-                "be indexed in Elasticsearch",
+                "be indexed in "
+                "Elasticsearch",
                 article.id,
                 exc_info=True,
             )
 
-        self.cache_repository.clear_all()
+        await self.cache_repository.clear_all()
 
         return article
 
-    def get_article(
+    async def get_article(
         self,
         article_id: str,
     ) -> KnowledgeArticle | None:
 
-        return self.repository.get_by_id(article_id)
+        return await self.article_repository.get_by_id(article_id)
 
-    def list_articles(
+    async def list_articles(
         self,
         limit: int,
     ) -> list[KnowledgeArticle]:
 
-        return self.repository.list(limit=limit)
+        return await self.article_repository.list(limit=limit)

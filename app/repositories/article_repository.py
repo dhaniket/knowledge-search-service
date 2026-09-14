@@ -5,7 +5,6 @@ from datetime import (
 
 from bson import ObjectId
 
-from app.db.mongodb import database
 from app.models.article import (
     KnowledgeArticle,
 )
@@ -16,21 +15,12 @@ from app.schemas.article import (
 
 class ArticleRepository:
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        database,
+    ) -> None:
 
         self.collection = database["articles"]
-        self.collection.create_index(
-            [
-                (
-                    "is_active",
-                    1,
-                ),
-                (
-                    "created_at",
-                    -1,
-                ),
-            ]
-        )
 
     @staticmethod
     def _document_to_article(
@@ -48,7 +38,7 @@ class ArticleRepository:
             updated_at=document["updated_at"],
         )
 
-    def create(
+    async def create(
         self,
         article_data: ArticleCreate,
     ) -> KnowledgeArticle:
@@ -65,13 +55,13 @@ class ArticleRepository:
             "updated_at": now,
         }
 
-        result = self.collection.insert_one(document)
+        result = await self.collection.insert_one(document)
 
         document["_id"] = result.inserted_id
 
         return self._document_to_article(document)
 
-    def get_by_id(
+    async def get_by_id(
         self,
         article_id: str,
     ) -> KnowledgeArticle | None:
@@ -79,14 +69,14 @@ class ArticleRepository:
         if not ObjectId.is_valid(article_id):
             return None
 
-        document = self.collection.find_one({"_id": ObjectId(article_id)})
+        document = await self.collection.find_one({"_id": ObjectId(article_id)})
 
         if document is None:
             return None
 
         return self._document_to_article(document)
 
-    def list(
+    async def list(
         self,
         limit: int = 20,
     ) -> list[KnowledgeArticle]:
@@ -100,4 +90,6 @@ class ArticleRepository:
             .limit(limit)
         )
 
-        return [self._document_to_article(document) for document in cursor]
+        documents = await cursor.to_list(length=limit)
+
+        return [self._document_to_article(document) for document in documents]

@@ -5,10 +5,10 @@ from fastapi import (
     HTTPException,
     Query,
 )
+
 from app.api.dependencies import (
     ArticleServiceDep,
 )
-
 from app.schemas.article import (
     ArticleCreate,
     ArticleResponse,
@@ -25,26 +25,27 @@ router = APIRouter(
     response_model=ArticleResponse,
     status_code=201,
 )
-def create_article(
+async def create_article(
     article_data: ArticleCreate,
     service: ArticleServiceDep,
 ):
 
-    return service.create_article(article_data)
+    return await service.create_article(article_data)
 
 
 @router.get(
     "/{article_id}",
     response_model=ArticleResponse,
 )
-def get_article(
+async def get_article(
     article_id: str,
     service: ArticleServiceDep,
 ):
 
-    article = service.get_article(article_id)
+    article = await service.get_article(article_id)
 
     if article is None:
+
         raise HTTPException(
             status_code=404,
             detail="Article not found",
@@ -57,7 +58,7 @@ def get_article(
     "",
     response_model=list[ArticleResponse],
 )
-def list_articles(
+async def list_articles(
     service: ArticleServiceDep,
     limit: Annotated[
         int,
@@ -68,4 +69,4 @@ def list_articles(
     ] = 20,
 ):
 
-    return service.list_articles(limit=limit)
+    return await service.list_articles(limit=limit)

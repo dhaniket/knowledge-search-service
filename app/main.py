@@ -1,3 +1,4 @@
+import logging
 from contextlib import (
     asynccontextmanager,
 )
@@ -7,19 +8,22 @@ from fastapi import FastAPI
 from app.api.articles import (
     router as articles_router,
 )
-from app.db.mongodb import (
-    check_database_connection,
-)
 from app.api.search import (
     router as search_router,
 )
 from app.cache.redis import (
-    check_redis_connection,
+    close_redis,
+    initialize_redis,
+)
+from app.db.mongodb import (
+    close_mongodb,
+    ensure_mongodb_indexes,
+    initialize_mongodb,
 )
 from app.search.elasticsearch import (
-    check_elasticsearch_connection,
+    close_elasticsearch,
+    initialize_elasticsearch,
 )
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +33,16 @@ async def lifespan(
     app: FastAPI,
 ):
 
-    check_database_connection()
+    # MongoDB is required.
+    await initialize_mongodb()
 
+    await ensure_mongodb_indexes()
+
+    # Elasticsearch is optional
+    # for article CRUD.
     try:
 
-        check_elasticsearch_connection()
+        await initialize_elasticsearch()
 
     except Exception:
 
@@ -42,9 +51,11 @@ async def lifespan(
             exc_info=True,
         )
 
+    # Redis is an optional
+    # performance layer.
     try:
 
-        check_redis_connection()
+        await initialize_redis()
 
     except Exception:
 
@@ -53,7 +64,17 @@ async def lifespan(
             exc_info=True,
         )
 
-    yield
+    try:
+
+        yield
+
+    finally:
+
+        await close_redis()
+
+        await close_elasticsearch()
+
+        await close_mongodb()
 
 
 app = FastAPI(
@@ -64,10 +85,11 @@ app = FastAPI(
 
 
 app.include_router(articles_router)
+
 app.include_router(search_router)
 
 
 @app.get("/health")
-def health_check():
+async def health_check():
 
     return {"status": "ok"}

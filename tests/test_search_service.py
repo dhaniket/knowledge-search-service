@@ -1,3 +1,5 @@
+import pytest
+
 from app.services.search_service import (
     SearchService,
 )
@@ -9,7 +11,7 @@ class FakeSearchRepository:
 
         self.call_count = 0
 
-    def search(
+    async def search(
         self,
         query: str,
         limit: int,
@@ -36,7 +38,7 @@ class FakeCacheRepository:
 
         self.set_calls = 0
 
-    def get(
+    async def get(
         self,
         query: str,
         limit: int,
@@ -44,7 +46,7 @@ class FakeCacheRepository:
 
         return self.cached_value
 
-    def set(
+    async def set(
         self,
         query: str,
         limit: int,
@@ -54,7 +56,8 @@ class FakeCacheRepository:
         self.set_calls += 1
 
 
-def test_search_cache_hit_skips_elasticsearch():
+@pytest.mark.anyio
+async def test_search_cache_hit_skips_elasticsearch():
 
     cached = [
         {
@@ -72,7 +75,7 @@ def test_search_cache_hit_skips_elasticsearch():
         cache_repository=(cache_repository),
     )
 
-    result = service.search_articles(
+    result = await service.search_articles(
         query="payment",
         limit=10,
     )
@@ -82,7 +85,8 @@ def test_search_cache_hit_skips_elasticsearch():
     assert search_repository.call_count == 0
 
 
-def test_search_cache_miss_uses_elasticsearch():
+@pytest.mark.anyio
+async def test_search_cache_miss_uses_elasticsearch():
 
     search_repository = FakeSearchRepository()
 
@@ -93,7 +97,7 @@ def test_search_cache_miss_uses_elasticsearch():
         cache_repository=(cache_repository),
     )
 
-    result = service.search_articles(
+    result = await service.search_articles(
         query="payment",
         limit=10,
     )
