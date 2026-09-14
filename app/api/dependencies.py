@@ -28,6 +28,10 @@ from app.services.article_service import (
 from app.services.search_service import (
     SearchService,
 )
+from app.config import (
+    get_elasticsearch_operation_timeout,
+    get_redis_operation_timeout,
+)
 
 
 async def get_article_repository() -> ArticleRepository:
@@ -81,6 +85,8 @@ async def get_article_service(
         article_repository=(article_repository),
         search_repository=(search_repository),
         cache_repository=(cache_repository),
+        elasticsearch_timeout=(get_elasticsearch_operation_timeout()),
+        redis_timeout=(get_redis_operation_timeout()),
     )
 
 

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from app.errors.search_errors import (
@@ -29,6 +30,8 @@ class ArticleService:
         article_repository: ArticleRepository,
         search_repository: ArticleSearchRepository,
         cache_repository: SearchCacheRepository,
+        elasticsearch_timeout: float,
+        redis_timeout: float,
     ) -> None:
 
         self.article_repository = article_repository
@@ -37,16 +40,27 @@ class ArticleService:
 
         self.cache_repository = cache_repository
 
-    async def create_article(
-        self,
-        article_data: ArticleCreate,
-    ) -> KnowledgeArticle:
+        self.elasticsearch_timeout = elasticsearch_timeout
 
-        article = await self.article_repository.create(article_data)
+        self.redis_timeout = redis_timeout
+
+    async def _index_article_best_effort(
+        self,
+        article: KnowledgeArticle,
+    ) -> None:
 
         try:
 
-            await self.search_repository.index_article(article)
+            async with asyncio.timeout(self.elasticsearch_timeout):
+
+                await self.search_repository.index_article(article)
+
+        except TimeoutError:
+
+            logger.warning(
+                "Elasticsearch indexing " "timed out for article %s",
+                article.id,
+            )
 
         except SearchIndexSyncError:
 
@@ -59,7 +73,32 @@ class ArticleService:
                 exc_info=True,
             )
 
-        await self.cache_repository.clear_all()
+    async def _clear_cache_best_effort(
+        self,
+    ) -> None:
+
+        try:
+
+            async with asyncio.timeout(self.redis_timeout):
+
+                await self.cache_repository.clear_all()
+
+        except TimeoutError:
+
+            logger.warning("Redis cache invalidation " "timed out")
+
+    async def create_article(
+        self,
+        article_data: ArticleCreate,
+    ) -> KnowledgeArticle:
+
+        article = await self.article_repository.create(article_data)
+
+        async with asyncio.TaskGroup() as group:
+
+            group.create_task(self._index_article_best_effort(article))
+
+            group.create_task(self._clear_cache_best_effort())
 
         return article
 

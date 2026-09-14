@@ -1,42 +1,32 @@
+import asyncio
+
+from app.config import (
+    get_elasticsearch_operation_timeout,
+    get_reindex_concurrency,
+)
 from app.db.mongodb import (
-    database,
+    close_mongodb,
+    get_database,
+    initialize_mongodb,
 )
 from app.search.elasticsearch import (
-    elasticsearch_client,
+    close_elasticsearch,
+    get_elasticsearch_client,
     get_elasticsearch_index,
+    initialize_elasticsearch,
 )
 from app.search.index_definition import (
     ARTICLE_INDEX_MAPPINGS,
 )
 
-index_name = get_elasticsearch_index()
+BATCH_SIZE = 100
 
 
-if elasticsearch_client.indices.exists(index=index_name):
+def build_search_document(
+    document: dict,
+) -> dict:
 
-    elasticsearch_client.indices.delete(index=index_name)
-
-
-elasticsearch_client.indices.create(
-    index=index_name,
-    mappings=ARTICLE_INDEX_MAPPINGS,
-)
-
-
-collection = database["articles"]
-
-
-documents = collection.find({"is_active": True})
-
-
-count = 0
-
-
-for document in documents:
-
-    article_id = str(document["_id"])
-
-    search_document = {
+    return {
         "title": document["title"],
         "content": document["content"],
         "tags": document["tags"],
@@ -46,16 +36,112 @@ for document in documents:
         "updated_at": document["updated_at"],
     }
 
-    elasticsearch_client.index(
-        index=index_name,
-        id=article_id,
-        document=search_document,
-    )
 
-    count += 1
+async def index_document(
+    document: dict,
+    semaphore: asyncio.Semaphore,
+) -> None:
+
+    client = get_elasticsearch_client()
+
+    index_name = get_elasticsearch_index()
+
+    async with semaphore:
+
+        async with asyncio.timeout(get_elasticsearch_operation_timeout()):
+
+            await client.index(
+                index=index_name,
+                id=str(document["_id"]),
+                document=(build_search_document(document)),
+            )
 
 
-elasticsearch_client.indices.refresh(index=index_name)
+async def index_batch(
+    documents: list[dict],
+    semaphore: asyncio.Semaphore,
+) -> None:
+
+    async with asyncio.TaskGroup() as group:
+
+        for document in documents:
+
+            group.create_task(
+                index_document(
+                    document=document,
+                    semaphore=semaphore,
+                )
+            )
 
 
-print(f"Rebuilt search index " f"with {count} articles")
+async def main() -> None:
+
+    await initialize_mongodb()
+
+    await initialize_elasticsearch()
+
+    try:
+
+        database = get_database()
+
+        collection = database["articles"]
+
+        client = get_elasticsearch_client()
+
+        index_name = get_elasticsearch_index()
+
+        if await client.indices.exists(index=index_name):
+
+            await client.indices.delete(index=index_name)
+
+        await client.indices.create(
+            index=index_name,
+            mappings=(ARTICLE_INDEX_MAPPINGS),
+        )
+
+        semaphore = asyncio.Semaphore(get_reindex_concurrency())
+
+        cursor = collection.find({"is_active": True})
+
+        batch = []
+
+        indexed_count = 0
+
+        async for document in cursor:
+
+            batch.append(document)
+
+            if len(batch) >= BATCH_SIZE:
+
+                await index_batch(
+                    documents=batch,
+                    semaphore=semaphore,
+                )
+
+                indexed_count += len(batch)
+
+                batch = []
+
+        if batch:
+
+            await index_batch(
+                documents=batch,
+                semaphore=semaphore,
+            )
+
+            indexed_count += len(batch)
+
+        await client.indices.refresh(index=index_name)
+
+        print("Rebuilt search index " f"with {indexed_count} " "articles")
+
+    finally:
+
+        await close_elasticsearch()
+
+        await close_mongodb()
+
+
+if __name__ == "__main__":
+
+    asyncio.run(main())

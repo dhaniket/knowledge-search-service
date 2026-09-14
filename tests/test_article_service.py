@@ -129,6 +129,8 @@ async def test_create_article_saves_indexes_and_clears_cache(
         article_repository=(article_repository),
         search_repository=(search_repository),
         cache_repository=(cache_repository),
+        elasticsearch_timeout=1.0,
+        redis_timeout=1.0,
     )
 
     result = await service.create_article(article_create)
@@ -160,6 +162,8 @@ async def test_create_article_still_succeeds_when_elasticsearch_fails(
         article_repository=(article_repository),
         search_repository=(search_repository),
         cache_repository=(cache_repository),
+        elasticsearch_timeout=1.0,
+        redis_timeout=1.0,
     )
 
     result = await service.create_article(article_create)
