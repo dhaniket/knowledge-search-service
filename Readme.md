@@ -1,18 +1,23 @@
 # Knowledge Search Service
 
-A production-oriented backend service for storing, searching, and caching knowledge-base articles.
+A production-oriented asynchronous backend service for storing, searching, and caching knowledge-base articles.
 
-The project combines:
+## Tech Stack
 
-- **MongoDB Atlas** as the authoritative document store
-- **Elasticsearch** for full-text relevance search
-- **Redis** for search-result caching
-- **FastAPI** for the HTTP API
-- **pytest** for service-level testing
-
-The goal is to demonstrate how multiple data technologies can be combined while keeping each one responsible for a specific problem.
-
----
+- Python 3.13+
+- FastAPI
+- Pydantic
+- PyMongo `AsyncMongoClient`
+- MongoDB Atlas
+- `AsyncElasticsearch`
+- Elastic Cloud
+- `redis.asyncio`
+- Redis Cloud
+- Uvicorn
+- pytest
+- AnyIO
+- python-dotenv
+- asyncio
 
 ## Architecture
 
@@ -20,7 +25,7 @@ The goal is to demonstrate how multiple data technologies can be combined while 
                          MongoDB Atlas
                          source of truth
                                │
-                               │ indexing
+                               │ derived indexing
                                ▼
                        Elasticsearch
                        full-text search
@@ -39,16 +44,28 @@ POST /api/v1/articles
         ▼
 ArticleService
         │
-        ├── MongoDB write
-        │      ↓
-        │   authoritative document
+        ▼
+Async MongoDB write
         │
-        ├── Elasticsearch indexing
-        │      ↓
-        │   searchable derived copy
+        ▼
+201 Created
         │
-        └── Redis cache invalidation
+        │ response returned
+        ▼
+FastAPI BackgroundTasks
+        │
+        ▼
+ArticleBackgroundService
+       / \
+      /   \
+     ▼     ▼
+Elasticsearch   Redis
+indexing        cache invalidation
 ```
+
+MongoDB is the only authoritative write required before returning `201 Created`.
+
+Elasticsearch indexing and Redis cache invalidation are derived, best-effort operations performed after the response path.
 
 ### Search
 
@@ -65,63 +82,42 @@ Redis
   │     ↓
   │   return cached result
   │
-  └── MISS
+  └── MISS / timeout / unavailable
         ↓
    Elasticsearch
         ↓
-   search results
+   relevance-ranked results
         ↓
    Redis SET + TTL
         ↓
       return
 ```
 
----
-
 ## Technology Responsibilities
 
 | Technology | Responsibility |
 |---|---|
 | MongoDB | Authoritative article/document storage |
-| Elasticsearch | Full-text relevance search |
-| Redis | Short-lived search-result cache |
+| Elasticsearch | Derived full-text relevance search index |
+| Redis | Disposable short-lived search-result cache |
 
 ```text
 MongoDB
 → source of truth
 
 Elasticsearch
-→ derived and rebuildable search index
+→ rebuildable derived state
 
 Redis
 → disposable performance layer
 ```
-
----
-
-## Tech Stack
-
-- Python 3.13+
-- FastAPI
-- Pydantic
-- PyMongo
-- MongoDB Atlas
-- Elasticsearch
-- Elastic Cloud
-- Redis
-- Redis Cloud
-- Uvicorn
-- pytest
-- python-dotenv
-
----
 
 ## Features
 
 - Create knowledge articles
 - Fetch an article by ID
 - List active articles
-- MongoDB document persistence
+- Native async MongoDB persistence
 - MongoDB `ObjectId` → application string ID conversion
 - Embedded tags
 - MongoDB compound indexing
@@ -138,13 +134,16 @@ Redis
 - Configurable TTL
 - Negative-result caching
 - Search-cache invalidation
+- Async timeouts for Redis and Elasticsearch
 - Graceful Redis failure handling
 - Graceful Elasticsearch indexing failure handling
-- Elasticsearch rebuild from MongoDB
+- FastAPI background processing
+- Structured concurrency with `asyncio.TaskGroup`
+- Bounded reindex concurrency with `asyncio.Semaphore`
+- Batched Elasticsearch rebuild
+- Async client lifecycle management
 - FastAPI dependency injection
-- Service-level unit tests with fake repositories
-
----
+- Async service-level tests with fake repositories
 
 ## API Endpoints
 
@@ -156,35 +155,64 @@ Redis
 | `GET` | `/api/v1/articles/{article_id}` | Fetch one article |
 | `GET` | `/api/v1/search?q=...` | Full-text relevance search |
 
----
+# Async Architecture
+
+The service uses native async clients throughout the external I/O path:
+
+```text
+FastAPI async endpoint
+        ↓
+async service
+        ↓
+async repository
+        ↓
+┌────────────────────────┐
+│ AsyncMongoClient       │
+│ AsyncElasticsearch     │
+│ redis.asyncio.Redis    │
+└────────────────────────┘
+        ↓
+network I/O
+        ↓
+event loop can serve
+other work while waiting
+```
+
+External clients are created during FastAPI lifespan startup and closed during shutdown.
+
+```text
+startup
+  ↓
+initialize MongoDB
+initialize Elasticsearch
+initialize Redis
+  ↓
+serve requests
+  ↓
+shutdown
+  ↓
+close Redis
+close Elasticsearch
+close MongoDB
+```
+
+MongoDB is required. Elasticsearch and Redis are degradable dependencies.
 
 # MongoDB
 
-MongoDB is the authoritative storage system.
-
-The configured database is:
+Configured database:
 
 ```text
 knowledge_app
 ```
 
-The main collection is:
+Main collection:
 
 ```text
 articles
 ```
 
-Conceptually:
-
-```text
-knowledge_app
-    ↓
-articles
-    ↓
-document
-```
-
-An article document resembles:
+Example document:
 
 ```json
 {
@@ -203,48 +231,12 @@ An article document resembles:
 }
 ```
 
-The repository converts MongoDB's `_id` / `ObjectId` into an application-facing string ID.
+The repository converts MongoDB `ObjectId` values into application-facing string IDs.
 
-```text
-MongoDB ObjectId
-      ↓
-Repository
-      ↓
-string ID
-      ↓
-Service / API
-```
-
-This keeps persistence-specific types out of the service and HTTP layers.
-
----
-
-## MongoDB Modelling
-
-Tags are embedded directly inside the article because they belong to the document, are small, and are typically read with the article.
-
-Example:
-
-```json
-{
-  "tags": [
-    "payment",
-    "refund",
-    "support"
-  ]
-}
-```
-
-A separate reference would be more appropriate for entities with an independent lifecycle or heavy reuse.
-
----
-
-## MongoDB Index
-
-The current article-list query filters active articles and sorts by creation time.
+The current MongoDB access pattern is supported by a compound index:
 
 ```python
-collection.create_index(
+await collection.create_index(
     [
         ("is_active", 1),
         ("created_at", -1),
@@ -252,13 +244,7 @@ collection.create_index(
 )
 ```
 
-Indexes are added according to real access patterns rather than automatically indexing every field.
-
----
-
 # Elasticsearch
-
-Elasticsearch stores a derived searchable representation of MongoDB articles.
 
 The search index is:
 
@@ -266,66 +252,28 @@ The search index is:
 knowledge-articles-v1
 ```
 
-MongoDB IDs are reused as Elasticsearch document IDs:
+MongoDB IDs are reused as Elasticsearch document IDs.
 
-```text
-MongoDB _id
-     ↓
-string
-     ↓
-Elasticsearch _id
-```
-
----
-
-## Elasticsearch Mapping
+The index uses explicit mappings:
 
 ```json
 {
-  "title": {
-    "type": "text"
-  },
-  "content": {
-    "type": "text"
-  },
+  "title": { "type": "text" },
+  "content": { "type": "text" },
   "tags": {
     "type": "text",
     "fields": {
-      "keyword": {
-        "type": "keyword"
-      }
+      "keyword": { "type": "keyword" }
     }
   },
-  "source": {
-    "type": "keyword"
-  },
-  "is_active": {
-    "type": "boolean"
-  },
-  "created_at": {
-    "type": "date"
-  },
-  "updated_at": {
-    "type": "date"
-  }
+  "source": { "type": "keyword" },
+  "is_active": { "type": "boolean" },
+  "created_at": { "type": "date" },
+  "updated_at": { "type": "date" }
 }
 ```
 
-### `text` vs `keyword`
-
-```text
-text
-→ analyzed full-text search
-
-keyword
-→ exact matching / filtering / aggregation
-```
-
----
-
-## Full-Text Search
-
-The search endpoint uses an Elasticsearch `multi_match` query.
+Search uses a `multi_match` query:
 
 ```python
 "multi_match": {
@@ -338,104 +286,23 @@ The search endpoint uses an Elasticsearch `multi_match` query.
 }
 ```
 
-Search importance:
+Only active articles are included.
 
-```text
-title
-→ strongest boost
-
-tags
-→ medium boost
-
-content
-→ normal weight
-```
-
-Active content is filtered with:
-
-```text
-is_active = true
-```
-
-Example:
-
-```http
-GET /api/v1/search?q=payment%20failed&limit=10
-```
-
----
-
-## Relevance and Inverted Indexes
-
-Elasticsearch ranks results by relevance rather than simple chronological or numeric ordering.
-
-At a high level, it uses an inverted-index structure conceptually like:
-
-```text
-payment
-→ document A
-→ document C
-
-password
-→ document B
-
-refund
-→ document D
-```
-
-This allows efficient full-text retrieval.
-
----
-
-## Near-Real-Time Search
-
-Elasticsearch is treated as a near-real-time search system.
-
-A newly indexed document may take a short time to become searchable. Normal writes do not force an explicit refresh after every document.
-
-Administrative setup/rebuild scripts may refresh explicitly when immediate visibility is useful.
-
----
+Elasticsearch is treated as near-real-time derived state, not as the primary database.
 
 # Redis
 
-Redis caches repeated Elasticsearch search results.
-
-Redis is not authoritative storage.
-
-Its job is:
-
-```text
-Have we already computed this search recently?
-```
-
-If yes:
-
-```text
-return cached result
-```
-
-If no:
-
-```text
-query Elasticsearch
-→ cache result
-→ return
-```
-
----
-
-## Cache-Aside Pattern
+Redis implements cache-aside for search results.
 
 ```text
 request
   ↓
 Redis GET
   ↓
-cache hit?
+hit?
 ```
 
-On hit:
+Hit:
 
 ```text
 Redis
@@ -443,7 +310,7 @@ Redis
 return cached result
 ```
 
-On miss:
+Miss:
 
 ```text
 Redis miss
@@ -457,255 +324,238 @@ Redis SET + TTL
 return
 ```
 
-Only successful search responses are cached.
-
----
-
-## Cache Key Design
-
-Queries are normalized before key generation.
+Queries are normalized before cache-key creation.
 
 ```text
 "  Payment   Failed "
+→ "payment failed"
 ```
 
-becomes:
-
-```text
-"payment failed"
-```
-
-A cache key looks conceptually like:
+Conceptual key:
 
 ```text
 search:v1:<query-hash>:limit:10
 ```
 
-It includes:
+Empty result sets are cached too, so `[]` is distinct from a cache miss (`None`).
 
-```text
-query
-limit
-cache version
-```
+Search cache keys are invalidated using the `search:*` namespace and Redis `SCAN`.
 
-because each can affect the response.
+# Timeouts
 
----
-
-## Cache-Key Versioning
-
-```text
-search:v1:
-```
-
-can later become:
-
-```text
-search:v2:
-```
-
-if ranking or response semantics change significantly.
-
-This makes old cache entries naturally obsolete.
-
----
-
-## TTL
-
-Search results expire automatically.
-
-Example:
+External operations have configurable deadlines:
 
 ```env
-SEARCH_CACHE_TTL_SECONDS=60
+REDIS_OPERATION_TIMEOUT_SECONDS=1.0
+ELASTICSEARCH_OPERATION_TIMEOUT_SECONDS=5.0
 ```
 
-Tradeoff:
+Redis timeout behavior:
 
 ```text
-short TTL
-→ fresher results
-→ more Elasticsearch requests
-
-long TTL
-→ more cache hits
-→ potentially staler results
+Redis timeout
+→ bypass cache
+→ Elasticsearch
 ```
 
----
-
-## Empty Search Results
-
-Empty search results are cached too.
-
-```python
-[]
-```
-
-is a valid cached response.
-
-A cache miss is:
-
-```python
-None
-```
-
-Therefore logic must use:
-
-```python
-if cached_results is not None:
-```
-
-rather than:
-
-```python
-if cached_results:
-```
-
-Otherwise cached empty results would be treated as misses.
-
----
-
-## Cache Invalidation
-
-When searchable article data changes, the service clears matching search keys:
+Elasticsearch timeout behavior:
 
 ```text
-search:*
+Elasticsearch timeout
+→ SearchUnavailableError
+→ HTTP 503
 ```
 
-The project uses incremental Redis `SCAN` rather than relying on a blocking full-keyspace lookup.
+# Structured Concurrency
 
-The strategy is intentionally coarse-grained because one article can influence many possible search queries.
+Independent post-write operations run concurrently with `asyncio.TaskGroup`.
 
----
+After MongoDB creates an article:
+
+```text
+                    ┌→ Elasticsearch indexing
+MongoDB article ────┤
+                    └→ Redis invalidation
+```
+
+Dependent operations remain sequential.
+
+For example:
+
+```text
+Redis GET
+  ↓
+MISS
+  ↓
+Elasticsearch
+  ↓
+Redis SET
+```
+
+# Background Processing
+
+Article creation uses FastAPI `BackgroundTasks`.
+
+Request path:
+
+```text
+POST
+ ↓
+MongoDB write
+ ↓
+201 Created
+```
+
+Post-response path:
+
+```text
+BackgroundTasks
+      ↓
+ArticleBackgroundService
+     /                  \
+Elasticsearch          Redis
+indexing              invalidation
+```
+
+This lowers request latency because the client does not wait for derived search/cache work.
+
+`201 Created` remains correct because the article already exists in MongoDB before the response is returned.
+
+## Background Task Reliability
+
+FastAPI background tasks run in the same process and are therefore best-effort rather than durable.
+
+Possible failure:
+
+```text
+MongoDB write succeeds
+        ↓
+201 response returned
+        ↓
+process crashes
+        ↓
+background indexing never runs
+```
+
+The architecture remains recoverable because:
+
+```text
+MongoDB
+→ authoritative article remains safe
+
+Elasticsearch
+→ can be rebuilt from MongoDB
+
+Redis
+→ stale entries expire by TTL
+```
+
+# Bounded Reindex Concurrency
+
+Elasticsearch rebuilds use:
+
+```env
+REINDEX_CONCURRENCY=10
+```
+
+An `asyncio.Semaphore` limits simultaneous indexing requests.
+
+```text
+100 tasks
+   ↓
+Semaphore(10)
+   ↓
+10 active
+90 waiting
+```
+
+The rebuild also batches documents to avoid creating excessive numbers of tasks at once.
+
+```text
+MongoDB async cursor
+       ↓
+batch
+       ↓
+TaskGroup
+       ↓
+Semaphore-limited indexing
+       ↓
+next batch
+```
 
 # Failure Handling
 
-## MongoDB Failure
+## MongoDB unavailable
 
 ```text
 MongoDB unavailable
 → authoritative persistence unavailable
-→ article creation cannot succeed
+→ article request fails
 ```
 
-MongoDB is required for article storage.
-
-## Elasticsearch Failure During Creation
+## Elasticsearch unavailable during background indexing
 
 ```text
-MongoDB write ✅
-Elasticsearch indexing ❌
+MongoDB ✅
+Elasticsearch ❌
 ```
 
-The article still exists.
+The article still exists and the indexing failure is logged.
 
-The service keeps the MongoDB result, logs the indexing failure, and returns the created article.
-
-## Redis Failure
+## Redis unavailable
 
 ```text
-Redis unavailable
-Elasticsearch available
+Redis ❌
+Elasticsearch ✅
 ```
 
-Search still works.
+Search continues without caching.
 
-Redis improves performance but is not required for correctness.
+## Elasticsearch unavailable during search
 
-## Elasticsearch Failure During Search
+```text
+Redis miss
+Elasticsearch ❌
+```
 
-If Redis misses and Elasticsearch is unavailable, the application cannot perform full-text search and returns a service-unavailable response.
-
----
+The API returns a search-unavailable response.
 
 # Eventual Consistency
 
 MongoDB, Elasticsearch, and Redis do not share one ACID transaction.
-
-There is no:
-
-```text
-BEGIN
-
-MongoDB write
-Elasticsearch write
-Redis clear
-
-COMMIT ALL
-```
-
-Instead:
 
 ```text
 MongoDB
 → authoritative state
 
 Elasticsearch
-→ derived state
+→ eventually synchronized derived state
 
 Redis
-→ cached state
+→ eventually refreshed cached state
 ```
 
-The derived systems can temporarily lag behind the source of truth.
-
-This is eventual consistency.
-
----
+This is an eventual-consistency design.
 
 # Elasticsearch Rebuild
 
-Elasticsearch is rebuildable from MongoDB.
+Elasticsearch can be rebuilt entirely from MongoDB:
 
 ```text
-MongoDB
-   ↓
-delete old Elasticsearch index
-   ↓
-recreate explicit mapping
-   ↓
-read active MongoDB articles
-   ↓
-index all documents
-   ↓
-refresh
+delete existing search index
+        ↓
+create explicit mapping
+        ↓
+async MongoDB cursor
+        ↓
+batch documents
+        ↓
+TaskGroup
+        ↓
+Semaphore-bounded indexing
+        ↓
+refresh index
 ```
-
-This proves:
-
-```text
-MongoDB
-→ authoritative
-
-Elasticsearch
-→ derived
-```
-
----
-
-# Dependency Injection
-
-FastAPI dependencies construct repositories and services.
-
-```text
-FastAPI dependency
-      ↓
-ArticleRepository
-ArticleSearchRepository
-SearchCacheRepository
-      ↓
-ArticleService
-SearchService
-      ↓
-Endpoint
-```
-
-This improves testability and avoids hard-coded global service construction inside routers.
-
----
 
 # Project Structure
 
@@ -745,21 +595,25 @@ knowledge-search-service/
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── article_service.py
+│   │   ├── article_background_service.py
 │   │   └── search_service.py
+│   ├── config.py
 │   └── main.py
 ├── scripts/
-│   ├── check_mongodb_connection.py
-│   ├── check_elasticsearch_connection.py
-│   ├── check_redis_connection.py
+│   ├── async_lab.py
+│   ├── check_async_mongodb.py
+│   ├── check_async_elasticsearch.py
+│   ├── check_async_redis.py
 │   ├── create_search_index.py
 │   ├── sync_articles_to_elasticsearch.py
 │   ├── rebuild_search_index.py
 │   ├── clear_search_cache.py
 │   └── check_search_cache.py
 ├── tests/
+│   ├── conftest.py
 │   ├── test_article_service.py
+│   ├── test_article_background_service.py
 │   └── test_search_service.py
-├── pytest.ini
 ├── .env
 ├── .env.example
 ├── .gitignore
@@ -767,11 +621,7 @@ knowledge-search-service/
 └── requirements.txt
 ```
 
----
-
 # Environment Configuration
-
-Create `.env`:
 
 ```env
 MONGODB_URI=mongodb+srv://your-real-mongodb-connection
@@ -783,6 +633,10 @@ ELASTICSEARCH_INDEX=knowledge-articles-v1
 
 REDIS_URL=your-real-redis-url
 SEARCH_CACHE_TTL_SECONDS=60
+
+REDIS_OPERATION_TIMEOUT_SECONDS=1.0
+ELASTICSEARCH_OPERATION_TIMEOUT_SECONDS=5.0
+REINDEX_CONCURRENCY=10
 ```
 
 Do not commit `.env`.
@@ -799,9 +653,11 @@ ELASTICSEARCH_INDEX=knowledge-articles-v1
 
 REDIS_URL=redis://username:password@hostname:port
 SEARCH_CACHE_TTL_SECONDS=60
-```
 
----
+REDIS_OPERATION_TIMEOUT_SECONDS=1.0
+ELASTICSEARCH_OPERATION_TIMEOUT_SECONDS=5.0
+REINDEX_CONCURRENCY=10
+```
 
 # Local Setup
 
@@ -810,54 +666,41 @@ git clone <repository-url>
 cd knowledge-search-service
 ```
 
-Create and activate a virtual environment:
+Windows PowerShell:
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-```
-
-Install dependencies:
-
-```powershell
 pip install -r requirements.txt
 ```
-
----
 
 # Infrastructure Checks
 
 ```powershell
-python -m scripts.check_mongodb_connection
-python -m scripts.check_elasticsearch_connection
-python -m scripts.check_redis_connection
+python -m scripts.check_async_mongodb
+python -m scripts.check_async_elasticsearch
+python -m scripts.check_async_redis
 ```
-
-These are manual infrastructure checks, not pytest unit tests.
-
----
 
 # Elasticsearch Setup
 
-Create the search index:
+Create the index:
 
 ```powershell
 python -m scripts.create_search_index
 ```
 
-Sync existing MongoDB content:
+Sync existing articles if needed:
 
 ```powershell
 python -m scripts.sync_articles_to_elasticsearch
 ```
 
-Completely rebuild Elasticsearch from MongoDB:
+Rebuild the search index:
 
 ```powershell
 python -m scripts.rebuild_search_index
 ```
-
----
 
 # Run the API
 
@@ -865,7 +708,7 @@ python -m scripts.rebuild_search_index
 python -m uvicorn app.main:app --reload
 ```
 
-Swagger UI:
+Swagger:
 
 ```text
 http://127.0.0.1:8000/docs
@@ -877,8 +720,6 @@ OpenAPI:
 http://127.0.0.1:8000/openapi.json
 ```
 
----
-
 # Example Article
 
 ```http
@@ -887,149 +728,53 @@ POST /api/v1/articles
 
 ```json
 {
-  "title": "Troubleshooting Payment Failures",
-  "content": "If a payment fails, verify that your card or payment method is active and has sufficient funds. Confirm the billing information and try again.",
+  "title": "Async Backend Architecture",
+  "content": "Async I/O allows a backend to continue serving work while network operations are waiting.",
   "tags": [
-    "payment",
-    "failure",
-    "billing",
-    "troubleshooting"
+    "python",
+    "async",
+    "backend"
   ],
-  "source": "help-center"
+  "source": "engineering"
 }
 ```
-
-Flow:
-
-```text
-FastAPI
-   ↓
-ArticleService
-   ↓
-MongoDB
-   ↓
-Elasticsearch
-   ↓
-Redis invalidation
-```
-
----
 
 # Example Search
 
 ```http
-GET /api/v1/search?q=payment%20failed&limit=10
+GET /api/v1/search?q=async%20backend&limit=10
 ```
-
-Conceptual result:
-
-```json
-[
-  {
-    "id": "article-id",
-    "score": 4.8,
-    "title": "Troubleshooting Payment Failures",
-    "content": "If a payment fails...",
-    "tags": [
-      "payment",
-      "failure",
-      "billing",
-      "troubleshooting"
-    ],
-    "source": "help-center",
-    "is_active": true,
-    "created_at": "...",
-    "updated_at": "..."
-  }
-]
-```
-
-Elasticsearch scores are not expected to remain exactly the same across datasets/configurations.
-
----
 
 # Testing
 
-Core service tests use fake repositories instead of live cloud infrastructure.
+Tests use fake repositories rather than live cloud infrastructure.
 
-This keeps tests:
+Async tests use:
+
+```python
+@pytest.mark.anyio
+async def test_...():
+    ...
+```
+
+Shared fixtures live in:
 
 ```text
-fast
-deterministic
-network-independent
-credential-independent
+tests/conftest.py
 ```
 
-## Search Service Tests
+The suite covers:
 
-```text
-SearchService
-   │
-   ├── FakeSearchRepository
-   └── FakeCacheRepository
-```
-
-Important behavior:
-
-```text
-CACHE HIT
-→ return cached result
-→ Elasticsearch not called
-
-CACHE MISS
-→ call Elasticsearch
-→ cache successful result
-→ return result
-```
-
-## Article Service Tests
-
-```text
-ArticleService
-   │
-   ├── FakeArticleRepository
-   ├── FakeSearchRepository
-   └── FakeCacheRepository
-```
-
-Important behavior:
-
-```text
-create succeeds
-→ Elasticsearch indexing attempted
-→ Redis invalidation attempted
-```
-
-Failure behavior:
-
-```text
-authoritative create succeeds
-Elasticsearch indexing fails
-→ article is still returned
-```
-
----
-
-# Pytest Configuration
-
-`pytest.ini`:
-
-```ini
-[pytest]
-testpaths = tests
-pythonpath = .
-```
-
-This ensures:
-
-```text
-tests/
-→ automated pytest tests
-
-scripts/
-→ manual setup/connectivity/admin utilities
-```
+- article persistence orchestration
+- background indexing
+- cache invalidation
+- cache hit
+- cache miss
+- Redis timeout
+- Redis absence
+- Elasticsearch timeout
+- Elasticsearch absence
+- non-fatal derived-infrastructure failures
 
 Run:
 
@@ -1037,84 +782,79 @@ Run:
 pytest -v
 ```
 
----
+# Key Engineering Concepts
 
-# Key Engineering Concepts Demonstrated
+## Async Python
+
+- `async def`
+- `await`
+- event loop
+- I/O-bound concurrency
+- blocking vs non-blocking work
+- `asyncio.gather`
+- `asyncio.TaskGroup`
+- `asyncio.timeout`
+- cancellation
+- `asyncio.to_thread`
+- `asyncio.Semaphore`
+- bounded concurrency
 
 ## MongoDB
 
-- databases
-- collections
+- async MongoDB driver
 - documents
-- BSON
 - `ObjectId`
 - embedding
-- references
 - compound indexes
-- document-oriented modelling
+- async cursors
 
 ## Elasticsearch
 
-- indexes
-- documents
+- `AsyncElasticsearch`
 - explicit mappings
-- `text`
-- `keyword`
-- `multi_match`
+- full-text search
+- `text` vs `keyword`
 - field boosting
 - filters
 - relevance scoring
 - inverted indexes
 - near-real-time search
-- rebuild/reindex workflows
+- rebuild workflows
 
 ## Redis
 
-- key/value storage
+- `redis.asyncio`
 - cache-aside
-- cache hits
-- cache misses
 - TTL
-- deterministic keys
-- query normalization
-- cache-key versioning
+- normalized deterministic keys
 - negative-result caching
 - invalidation
 - graceful degradation
-- `SCAN`
 
 ## Backend Architecture
 
-- FastAPI
-- Pydantic validation
-- router/service/repository separation
+- async FastAPI endpoints
+- lifespan-managed clients
 - dependency injection
-- source-of-truth design
-- derived data
+- router/service/repository separation
+- background processing
+- source of truth
+- derived state
 - graceful degradation
 - eventual consistency
-
-## Testing
-
-- unit tests
-- fake repositories
-- failure-path testing
-- infrastructure smoke checks
-- pytest collection configuration
-
----
 
 # Current Limitations
 
 The service intentionally does not yet include:
 
-- authentication or authorization
-- update/delete article endpoints
-- background workers
-- message brokers
+- authentication / authorization
+- update/delete article synchronization
+- durable external job queue
+- message broker
+- retry queue
 - transactional outbox
-- automatic retry queue for failed indexing
-- advanced cache invalidation
+- dead-letter queue
+- idempotent event consumers
 - Docker
 - Kubernetes
 - production metrics/tracing
@@ -1122,28 +862,11 @@ The service intentionally does not yet include:
 - RAG
 - LLM integration
 
----
+FastAPI `BackgroundTasks` is intentionally used only as a lightweight in-process mechanism. It is not treated as a durable job system.
 
-# Possible Future Improvements
+# Future Evolution
 
-```text
-article update/delete synchronization
-background Elasticsearch indexing
-retry mechanism
-outbox pattern
-Kafka or RabbitMQ
-structured logging
-metrics
-distributed tracing
-Docker
-CI/CD
-authentication
-rate limiting
-semantic/vector search
-RAG
-```
-
-A larger production write flow could evolve toward:
+A more durable write architecture could evolve toward:
 
 ```text
 API
@@ -1152,7 +875,7 @@ MongoDB
  ↓
 outbox/event
  ↓
-message broker
+Kafka / RabbitMQ
  ↓
 background consumer
  ↓
@@ -1161,34 +884,51 @@ Elasticsearch
 cache invalidation
 ```
 
----
+This would add:
+
+```text
+durable delivery
+retries
+consumer acknowledgements
+dead-letter handling
+idempotency
+decoupling
+```
 
 # Design Principles
 
 ```text
-Make the source of truth explicit
+Keep MongoDB authoritative
 
-Treat search indexes as rebuildable
+Treat Elasticsearch as rebuildable
 
-Treat caches as disposable
+Treat Redis as disposable
 
-Keep infrastructure concerns inside repositories
+Use native async I/O for network operations
 
-Keep HTTP concerns inside routers
+Do not confuse async with concurrency
 
-Keep orchestration/business behavior inside services
+Only run independent operations concurrently
+
+Bound concurrency instead of launching unlimited tasks
+
+Put deadlines around external dependencies
+
+Keep cache failures non-fatal
+
+Keep derived indexing failures non-authoritative
+
+Separate request-time work from background work
+
+Do not treat in-process background work as durable
+
+Keep infrastructure-specific details inside repositories
 
 Use dependency injection for replaceable components
 
-Gracefully degrade optional infrastructure
+Test failure behavior explicitly
 
-Do not make cache availability a correctness requirement
-
-Avoid cross-system consistency assumptions
-
-Test architectural decisions through failure-path unit tests
-
-Add complexity only when a real requirement justifies it
+Add infrastructure only when a real requirement justifies it
 ```
 
-The result is a compact multi-database backend demonstrating how document storage, full-text search, caching, and failure handling can work together without confusing their responsibilities.
+The result is a compact asynchronous multi-database backend demonstrating document storage, full-text search, caching, structured concurrency, failure handling, and lightweight background processing while keeping authoritative data safe.

@@ -6,6 +6,10 @@ from app.cache.redis import (
     get_redis_client,
     get_search_cache_ttl,
 )
+from app.config import (
+    get_elasticsearch_operation_timeout,
+    get_redis_operation_timeout,
+)
 from app.db.mongodb import (
     get_database,
 )
@@ -22,15 +26,14 @@ from app.search.elasticsearch import (
     get_elasticsearch_client,
     get_elasticsearch_index,
 )
+from app.services.article_background_service import (
+    ArticleBackgroundService,
+)
 from app.services.article_service import (
     ArticleService,
 )
 from app.services.search_service import (
     SearchService,
-)
-from app.config import (
-    get_elasticsearch_operation_timeout,
-    get_redis_operation_timeout,
 )
 
 
@@ -41,20 +44,48 @@ async def get_article_repository() -> ArticleRepository:
     )
 
 
-async def get_article_search_repository() -> ArticleSearchRepository:
+def get_optional_search_repository() -> ArticleSearchRepository | None:
+
+    try:
+
+        client = get_elasticsearch_client()
+
+    except RuntimeError:
+
+        return None
 
     return ArticleSearchRepository(
-        client=(get_elasticsearch_client()),
+        client=client,
         index_name=(get_elasticsearch_index()),
     )
 
 
-async def get_search_cache_repository() -> SearchCacheRepository:
+OptionalSearchRepositoryDep = Annotated[
+    ArticleSearchRepository | None,
+    Depends(get_optional_search_repository),
+]
+
+
+def get_optional_cache_repository() -> SearchCacheRepository | None:
+
+    try:
+
+        client = get_redis_client()
+
+    except RuntimeError:
+
+        return None
 
     return SearchCacheRepository(
-        client=get_redis_client(),
+        client=client,
         ttl_seconds=(get_search_cache_ttl()),
     )
+
+
+OptionalCacheRepositoryDep = Annotated[
+    SearchCacheRepository | None,
+    Depends(get_optional_cache_repository),
+]
 
 
 ArticleRepositoryDep = Annotated[
@@ -63,31 +94,11 @@ ArticleRepositoryDep = Annotated[
 ]
 
 
-ArticleSearchRepositoryDep = Annotated[
-    ArticleSearchRepository,
-    Depends(get_article_search_repository),
-]
-
-
-SearchCacheRepositoryDep = Annotated[
-    SearchCacheRepository,
-    Depends(get_search_cache_repository),
-]
-
-
-async def get_article_service(
+def get_article_service(
     article_repository: ArticleRepositoryDep,
-    search_repository: ArticleSearchRepositoryDep,
-    cache_repository: SearchCacheRepositoryDep,
 ) -> ArticleService:
 
-    return ArticleService(
-        article_repository=(article_repository),
-        search_repository=(search_repository),
-        cache_repository=(cache_repository),
-        elasticsearch_timeout=(get_elasticsearch_operation_timeout()),
-        redis_timeout=(get_redis_operation_timeout()),
-    )
+    return ArticleService(article_repository=(article_repository))
 
 
 ArticleServiceDep = Annotated[
@@ -96,14 +107,35 @@ ArticleServiceDep = Annotated[
 ]
 
 
-async def get_search_service(
-    search_repository: ArticleSearchRepositoryDep,
-    cache_repository: SearchCacheRepositoryDep,
+def get_article_background_service(
+    search_repository: OptionalSearchRepositoryDep,
+    cache_repository: OptionalCacheRepositoryDep,
+) -> ArticleBackgroundService:
+
+    return ArticleBackgroundService(
+        search_repository=(search_repository),
+        cache_repository=(cache_repository),
+        elasticsearch_timeout=(get_elasticsearch_operation_timeout()),
+        redis_timeout=(get_redis_operation_timeout()),
+    )
+
+
+ArticleBackgroundServiceDep = Annotated[
+    ArticleBackgroundService,
+    Depends(get_article_background_service),
+]
+
+
+def get_search_service(
+    search_repository: OptionalSearchRepositoryDep,
+    cache_repository: OptionalCacheRepositoryDep,
 ) -> SearchService:
 
     return SearchService(
         search_repository=(search_repository),
         cache_repository=(cache_repository),
+        elasticsearch_timeout=(get_elasticsearch_operation_timeout()),
+        redis_timeout=(get_redis_operation_timeout()),
     )
 
 

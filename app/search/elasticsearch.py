@@ -45,14 +45,24 @@ async def initialize_elasticsearch() -> None:
 
     global _elasticsearch_client
 
-    if _elasticsearch_client is None:
+    client = AsyncElasticsearch(
+        get_elasticsearch_url(),
+        api_key=(get_elastic_api_key()),
+    )
 
-        _elasticsearch_client = AsyncElasticsearch(
-            get_elasticsearch_url(),
-            api_key=(get_elastic_api_key()),
-        )
+    try:
 
-    await _elasticsearch_client.info()
+        await client.info()
+
+    except Exception:
+
+        await client.close()
+
+        _elasticsearch_client = None
+
+        raise
+
+    _elasticsearch_client = client
 
 
 def get_elasticsearch_client() -> AsyncElasticsearch:

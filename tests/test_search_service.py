@@ -200,3 +200,43 @@ async def test_redis_timeout_falls_back_to_elasticsearch():
     assert len(result) == 1
 
     assert search_repository.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_search_works_without_redis():
+
+    search_repository = FakeSearchRepository()
+
+    service = SearchService(
+        search_repository=(search_repository),
+        cache_repository=None,
+        elasticsearch_timeout=1.0,
+        redis_timeout=1.0,
+    )
+
+    result = await service.search_articles(
+        query="payment",
+        limit=10,
+    )
+
+    assert len(result) == 1
+
+    assert search_repository.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_missing_elasticsearch_raises_search_unavailable():
+
+    service = SearchService(
+        search_repository=None,
+        cache_repository=None,
+        elasticsearch_timeout=1.0,
+        redis_timeout=1.0,
+    )
+
+    with pytest.raises(SearchUnavailableError):
+
+        await service.search_articles(
+            query="payment",
+            limit=10,
+        )

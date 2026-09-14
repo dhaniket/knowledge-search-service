@@ -40,14 +40,24 @@ async def initialize_redis() -> None:
 
     global _redis_client
 
-    if _redis_client is None:
+    client = Redis.from_url(
+        get_redis_url(),
+        decode_responses=True,
+    )
 
-        _redis_client = Redis.from_url(
-            get_redis_url(),
-            decode_responses=True,
-        )
+    try:
 
-    await _redis_client.ping()
+        await client.ping()
+
+    except Exception:
+
+        await client.aclose()
+
+        _redis_client = None
+
+        raise
+
+    _redis_client = client
 
 
 def get_redis_client() -> Redis:

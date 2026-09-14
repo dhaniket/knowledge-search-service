@@ -18,8 +18,8 @@ class SearchService:
 
     def __init__(
         self,
-        search_repository: ArticleSearchRepository,
-        cache_repository: SearchCacheRepository,
+        search_repository: ArticleSearchRepository | None,
+        cache_repository: SearchCacheRepository | None,
         elasticsearch_timeout: float,
         redis_timeout: float,
     ) -> None:
@@ -37,6 +37,10 @@ class SearchService:
         query: str,
         limit: int,
     ) -> list[dict] | None:
+
+        if self.cache_repository is None:
+
+            return None
 
         try:
 
@@ -59,6 +63,9 @@ class SearchService:
         limit: int,
         results: list[dict],
     ) -> None:
+
+        if self.cache_repository is None:
+            return
 
         try:
 
@@ -88,6 +95,10 @@ class SearchService:
         if cached_results is not None:
 
             return cached_results
+
+        if self.search_repository is None:
+
+            raise SearchUnavailableError("Search service " "is unavailable")
 
         try:
 
