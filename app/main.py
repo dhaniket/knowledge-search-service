@@ -24,6 +24,10 @@ from app.search.elasticsearch import (
     close_elasticsearch,
     initialize_elasticsearch,
 )
+from app.messaging.rabbitmq import (
+    close_rabbitmq,
+    initialize_rabbitmq,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,17 @@ async def lifespan(
     await initialize_mongodb()
 
     await ensure_mongodb_indexes()
+
+    try:
+
+        await initialize_rabbitmq()
+
+    except Exception:
+
+        logger.warning(
+            "RabbitMQ unavailable " "during startup",
+            exc_info=True,
+        )
 
     # Elasticsearch is optional
     # for article CRUD.
@@ -69,6 +84,7 @@ async def lifespan(
         yield
 
     finally:
+        await close_rabbitmq()
 
         await close_redis()
 

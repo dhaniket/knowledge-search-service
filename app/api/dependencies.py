@@ -26,15 +26,42 @@ from app.search.elasticsearch import (
     get_elasticsearch_client,
     get_elasticsearch_index,
 )
-from app.services.article_background_service import (
-    ArticleBackgroundService,
-)
 from app.services.article_service import (
     ArticleService,
 )
 from app.services.search_service import (
     SearchService,
 )
+from app.messaging.rabbitmq import (
+    get_article_index_queue,
+    get_rabbitmq_channel,
+)
+
+from app.messaging.article_index_job_publisher import (
+    ArticleIndexJobPublisher,
+)
+
+
+async def get_optional_article_index_job_publisher() -> ArticleIndexJobPublisher | None:
+
+    try:
+
+        channel = get_rabbitmq_channel()
+
+    except RuntimeError:
+
+        return None
+
+    return ArticleIndexJobPublisher(
+        exchange=(channel.default_exchange),
+        queue_name=(get_article_index_queue()),
+    )
+
+
+OptionalArticleIndexJobPublisherDep = Annotated[
+    ArticleIndexJobPublisher | None,
+    Depends(get_optional_article_index_job_publisher),
+]
 
 
 async def get_article_repository() -> ArticleRepository:
@@ -94,35 +121,20 @@ ArticleRepositoryDep = Annotated[
 ]
 
 
-def get_article_service(
+async def get_article_service(
     article_repository: ArticleRepositoryDep,
+    index_job_publisher: OptionalArticleIndexJobPublisherDep,
 ) -> ArticleService:
 
-    return ArticleService(article_repository=(article_repository))
+    return ArticleService(
+        article_repository=(article_repository),
+        index_job_publisher=(index_job_publisher),
+    )
 
 
 ArticleServiceDep = Annotated[
     ArticleService,
     Depends(get_article_service),
-]
-
-
-def get_article_background_service(
-    search_repository: OptionalSearchRepositoryDep,
-    cache_repository: OptionalCacheRepositoryDep,
-) -> ArticleBackgroundService:
-
-    return ArticleBackgroundService(
-        search_repository=(search_repository),
-        cache_repository=(cache_repository),
-        elasticsearch_timeout=(get_elasticsearch_operation_timeout()),
-        redis_timeout=(get_redis_operation_timeout()),
-    )
-
-
-ArticleBackgroundServiceDep = Annotated[
-    ArticleBackgroundService,
-    Depends(get_article_background_service),
 ]
 
 

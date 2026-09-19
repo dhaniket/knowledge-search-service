@@ -8,7 +8,6 @@ from fastapi import (
 )
 
 from app.api.dependencies import (
-    ArticleBackgroundServiceDep,
     ArticleServiceDep,
 )
 from app.schemas.article import (
@@ -29,19 +28,10 @@ router = APIRouter(
 )
 async def create_article(
     article_data: ArticleCreate,
-    background_tasks: BackgroundTasks,
     service: ArticleServiceDep,
-    background_service: ArticleBackgroundServiceDep,
 ):
 
-    article = await service.create_article(article_data)
-
-    background_tasks.add_task(
-        background_service.process_created_article,
-        article,
-    )
-
-    return article
+    return await service.create_article(article_data)
 
 
 @router.get(
