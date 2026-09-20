@@ -1,8 +1,8 @@
 # Knowledge Search Service
 
-An asynchronous knowledge-base backend built with FastAPI, MongoDB Atlas, Elasticsearch, Redis, RabbitMQ, and Apache Kafka (Aiven Free). It demonstrates full-text search and caching alongside reliable asynchronous message delivery, independent event consumers, replay, and failure recovery.
+An asynchronous knowledge-base backend built with FastAPI, MongoDB Atlas, Elasticsearch, Redis, RabbitMQ, and Apache Kafka (Aiven Free). It demonstrates full-text search and caching, recoverable messaging, independent event consumers, and repeatable local deployment using Docker Compose, with automated checks using GitHub Actions.
 
-> This README describes the intended architecture after the embedded-outbox implementation is applied and the test suite and live verification are complete. Do not treat an unrun example as proof of successful deployment.
+> **Implementation and verification note:** This README documents the application design and the container/CI configuration introduced for the project. It was prepared from the project documentation and planned changes, not from a checkout of your current Windows repository. Confirm that the outbox refactor, Docker files, tests, and GitHub Actions workflow are present and passing before describing this project as deployed or fully verified.
 
 ## Architecture
 
@@ -26,6 +26,35 @@ Client → FastAPI → ArticleService → MongoDB Atlas (knowledge_app)
 **Source of truth:** MongoDB articles. **Derived systems:** Elasticsearch full-text index and Redis search cache. RabbitMQ carries an `article.index.requested` work command. Kafka carries an `article.created` domain event.
 
 An article and its two pending publication records are written in **one MongoDB document insert**. The API returns `201 Created` after the authoritative write. A separate dispatcher publishes both deliveries and marks each as published only after its broker confirms acceptance.
+
+## Runtime and deployment overview
+
+The same Python codebase runs as five independent processes. Docker builds **one image**, and Compose starts five containers from it with different commands. The databases and brokers remain managed externally; Compose does not start or migrate them.
+
+```text
+                      developer pushes code
+                              |
+                              v
+                     GitHub Actions CI
+                  lint -> pytest -> image build
+                              |
+                validated image definition
+                              |
+                              v
+                    Docker Compose (local)
+       +------------+------------+------------+
+       |            |            |            |
+       v            v            v            v
+      API         outbox     index worker   Kafka consumers
+                               RabbitMQ     audit / analytics
+       |            |            |            |
+       +------------+------------+------------+
+                              |
+        MongoDB Atlas / Elastic Cloud / Redis Cloud
+                 RabbitMQ / Aiven Kafka
+```
+
+**Why separate containers?** The API can answer requests while the dispatcher or a consumer is offline. Each process has its own lifecycle and logs. Docker standardizes execution; the MongoDB outbox and broker acknowledgements—not Docker—provide messaging recovery. The compose file defines a local runtime, **not an internet-facing production deployment**.
 
 ## Technologies
 
@@ -111,7 +140,7 @@ Search uses Elasticsearch multi-match over `title^3`, `tags^2`, and `content`, f
 
 The administrative rebuild reads the MongoDB source of truth through an async cursor, indexes in batches and uses `asyncio.Semaphore` to bound concurrent Elasticsearch requests. Elasticsearch is near-real-time; the rebuild script can explicitly refresh after bulk restoration.
 
-## Setup
+## Configuration and local Python setup
 
 In Windows PowerShell:
 
@@ -148,7 +177,7 @@ Use the actual protocol/host/port supplied by each service. Save Aiven's CA cert
 
 Create the Kafka topic using Aiven's console and ensure the RabbitMQ queues are declared by initialization. The project does not require new paid broker services for the outbox.
 
-## Run
+## Run without Docker (alternative)
 
 Start each process in a separate activated PowerShell terminal:
 
@@ -174,11 +203,206 @@ python -m scripts.rebuild_search_index
 
 Keep `rebuild_search_index` for repairs; it is not an everyday message-processing step.
 
+## Run using Docker Compose (recommended for local integration)
+
+### Prerequisites and the reason for each
+
+- Docker Desktop running in **Linux container** mode (WSL2 backend on Windows); provides the Linux container runtime.
+- `Dockerfile`, `compose.yaml`, `requirements.txt`, and `.dockerignore` at the repository root; define the packaged code and multi-process runtime.
+- A local `.env` populated with valid **development** credentials; Compose injects it at runtime and it must not be committed or copied into the image.
+- `certs/ca.pem`, downloaded from the Aiven service; required for TLS certificate verification by the Kafka dispatcher and consumers.
+- Existing reachable managed MongoDB, Elasticsearch, Redis, RabbitMQ, and Aiven Kafka services. MongoDB must be accessible from Docker's network, and Aiven's free Kafka service may need to be powered on.
+- A passing local Python test baseline. Containerization does not fix application bugs.
+
+The Docker configuration is designed as follows:
+
+| File | Purpose | Important decision |
+|---|---|---|
+| `Dockerfile` | Builds a Python 3.13 Linux image, installs dependencies, copies `app/` and `scripts/` | Runs as non-root `appuser`; default process is Uvicorn. |
+| `.dockerignore` | Removes unnecessary/sensitive files from the build context | Excludes `.env`, `certs/`, `.venv/`, `.git/`, `tests/`, `.ruff_cache/`. |
+| `compose.yaml` | Declares five application services and their startup commands | Reuses one image; exposes the API only at `127.0.0.1:8000`. |
+| `.env` | Supplies managed-service connection details at container runtime | Never embed it in the image or commit it. |
+| `certs/ca.pem` | Trust certificate for Aiven Kafka TLS | Mounted read-only into Kafka-enabled containers. |
+
+The image should use one logical Dockerfile `CMD` instruction:
+
+```dockerfile
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+**Why `0.0.0.0` here?** It lets the application accept traffic through Docker's port mapping *inside* the container. Compose should publish only `127.0.0.1:8000:8000` on the Windows host, so the development API is not deliberately exposed to your LAN.
+
+### Certificate path: Windows versus Linux
+
+The Windows `.env` path `KAFKA_CA_FILE=certs/ca.pem` does not exist automatically inside a Linux container. In `compose.yaml`, the **outbox**, **audit**, and **analytics** services mount the local certificate and override that path:
+
+```yaml
+environment:
+  KAFKA_CA_FILE: /run/certs/ca.pem
+volumes:
+  - ./certs/ca.pem:/run/certs/ca.pem:ro
+```
+
+The `:ro` suffix means the container cannot write to this file. Neither the certificate directory nor `.env` should be copied into the image. In PowerShell, verify that `Test-Path .\certs\ca.pem` returns `True`. Use the SASL host and port supplied by Aiven, not an HTTPS URL. Do not disable certificate verification to bypass TLS errors.
+
+### Starting the stack
+
+Run these commands **from the repository root in Windows PowerShell**, after stopping the five equivalent Python processes that you previously started manually:
+
+```powershell
+docker --version
+docker compose version
+Test-Path .\certs\ca.pem
+pytest -v
+docker compose config -q
+docker compose up -d --build
+docker compose ps
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+`config -q` validates Compose without printing resolved configuration; avoid sharing the unredacted output of `docker compose config`, which can contain secrets. `up -d --build` builds the shared image and starts the services in the background. Swagger UI: <http://127.0.0.1:8000/docs>.
+
+| Compose service | Entrypoint | Responsibility |
+|---|---|---|
+| `api` | `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000` | Accept requests and atomically save articles with publication intent. |
+| `outbox` | `python -m app.workers.outbox_dispatcher` | Read pending delivery records, publish to both brokers and mark confirmed deliveries. |
+| `index-worker` | `python -m app.workers.article_index_worker` | Consume RabbitMQ jobs, index Elasticsearch, invalidate Redis, ACK. |
+| `audit` | `python -m app.workers.article_event_consumer --role audit` | Process Kafka events for `knowledge-audit-v1`. |
+| `analytics` | `python -m app.workers.article_event_consumer --role analytics` | Process Kafka events for `knowledge-analytics-v1`. |
+
+The API's `/health` is a **liveness** check, not evidence that all five external services or background consumers are healthy. `docker compose ps` and the logs must also be inspected. Once containers are running, create a test article using Swagger; check both outbox statuses, Elasticsearch indexing, and the two Kafka-backed MongoDB event collections.
+
+### Common operating commands
+
+```powershell
+# Status and recent logs
+docker compose ps
+docker compose logs --tail=50 outbox
+docker compose logs -f audit
+
+# Execute administrative scripts *inside* an existing service
+docker compose exec outbox python -m scripts.check_outbox
+docker compose exec analytics python -m scripts.show_article_analytics
+
+# Practice process failure and recovery
+docker compose stop outbox
+# POST an article now: its outbox entries should stay pending.
+docker compose start outbox
+# It should publish the backlog after it starts.
+
+# Rebuild after changing application code
+docker compose up -d --build
+
+# Stop/remove only Compose-managed local application containers
+docker compose down
+```
+
+Stopping a consumer does not stop the API. Stopping the dispatcher does not erase MongoDB outbox records. Stopping the RabbitMQ **worker** does not make the RabbitMQ broker unavailable: queued work can be consumed after restart. `docker compose down` does not delete the externally hosted database/broker data.
+
+### Linux inspection inside a container
+
+```powershell
+docker compose exec api sh
+```
+
+Inside the shell:
+
+```sh
+pwd                 # expected: /app
+ls -la
+id                  # should be non-root appuser
+python --version
+ls app
+exit
+```
+
+To inspect the Aiven CA from the audit container:
+
+```powershell
+docker compose exec audit sh -c "ls -l /run/certs/ca.pem"
+```
+
+The application image is intentionally slim: commands such as `bash`, `curl`, or `ps` may be absent. Prefer `sh`, built-in Python checks, and `docker compose logs`. `docker compose restart` restarts the **existing image**; when code or dependency files change, rebuild with `docker compose up -d --build`.
+
+### Docker troubleshooting
+
+| Symptom | Diagnosis |
+|---|---|
+| Cannot connect to Docker daemon | Start Docker Desktop; confirm Linux containers/WSL2. |
+| Port 8000 already allocated | Stop the previous Windows Uvicorn process. |
+| Image build fails in `pip install` | Verify `requirements.txt` is complete and Linux-compatible. |
+| Kafka certificate missing | Check host `certs/ca.pem`, read-only mount, and container `KAFKA_CA_FILE`. |
+| Broker connection errors | Inspect `.env` values, Aiven service state, network access and TLS settings. |
+| API health OK but indexing missing | Inspect dispatcher and index-worker logs plus outbox backlog. |
+| Code changes not reflected | Rebuild the image; do not only restart the container. |
+
+---
+
+## Continuous integration: GitHub Actions
+
+`.github/workflows/ci.yml` defines an intended Linux CI pipeline for pushes, pull requests, and manual runs:
+
+```text
+push / pull request / manual dispatch
+               |
+               v
+      checkout repository
+               |
+               v
+    set up Python 3.13
+               |
+               v
+ install dependencies + Ruff
+               |
+               v
+ compileall + focused Ruff checks
+               |
+               v
+           pytest -v
+               |
+       +-------+-------+
+       |               |
+       v               v
+    tests fail       tests pass
+    stop build           |
+                         v
+                   Docker build
+                   (push: false)
+```
+
+**Why:** Manual local tests can be forgotten. The CI test job catches code failures on a clean Linux runner; `needs: test` prevents the image-build job from starting when the tests fail. The Docker job checks that an image can be built but does **not** push it to a registry or deploy it. This is CI and a delivery foundation, **not continuous deployment**.
+
+The workflow should do the following:
+
+- Give its default GitHub token only `contents: read` permission.
+- Install dependencies from `requirements.txt` and explicitly install missing developer tools such as `pytest` and `ruff` if they are not in that file.
+- Run `python -m compileall -q app scripts tests`.
+- Run `ruff check app scripts tests --select E4,E7,E9,F63,F7,F82` as an initial focused correctness gate.
+- Run `pytest -v` with fake repositories/brokers; tests should not require live cloud credentials.
+- Build an image using Docker Buildx with `push: false`, after the tests pass.
+
+GitHub Action versions and build configuration live in the actual `.github/workflows/ci.yml`; review that file before a public push. A green workflow proves only its configured checks—not production readiness, external-service health, or successful deployment.
+
+### Local checks matching CI
+
+```powershell
+python -m compileall -q app scripts tests
+ruff check app scripts tests --select E4,E7,E9,F63,F7,F82
+pytest -v
+docker compose config -q
+docker compose build
+```
+
+Inspect **GitHub repository → Actions → Backend CI** after pushing. Confirm that both the tests and the Docker-build job actually succeeded; don't claim CI is passing solely because the YAML file exists. No managed-service secrets are needed for fake-based unit tests.
+
+---
+
 ## Tests and failure drills
 
 ```powershell
 pytest -v
 python -m compileall -q app scripts tests
+ruff check app scripts tests --select E4,E7,E9,F63,F7,F82
 ```
 
 The unit suite uses fake repositories/brokers for service orchestration, outbox state, publishing failures, ACK ordering, retry/DLQ behavior, Kafka manual offset commits, replay, and idempotency. Verify that the actual `ArticleRepository.create()` submits **one insert** containing the article and both pending outbox records.
@@ -204,6 +428,13 @@ Recommended integration drills:
 | Elasticsearch/Redis | Derived and rebuildable/disposable | Index synchronization and cache freshness are eventual |
 
 The system provides **atomic publication intent** for newly created articles, not an atomic transaction spanning MongoDB, RabbitMQ and Kafka. Broker publication is at-least-once in normal recoverable failure scenarios, not exactly-once delivery. For production, add persistent supervision, oldest-pending alerts, consumer-lag monitoring, broker durability review, stronger ordering rules for update/delete events, and an incident procedure for unrecoverable failures.
+
+## Security, scope and verification status
+
+- `.gitignore` and `.dockerignore` serve different purposes: the former excludes files from Git; the latter excludes them from Docker's build context. Both should exclude `.ruff_cache/`, `.env` and `certs/` where appropriate. If a secret was previously committed, simply adding it to `.gitignore` does not remove it from Git history—revoke/rotate it and remediate the repository history separately.
+- `.env` is acceptable for this private local development setup, but environment variables are not a production secrets manager. Use platform-managed secrets and least privilege for real deployments.
+- There is no Kubernetes deployment, public cloud deployment target, container registry release or automatic production rollout documented here. Those are separate tasks requiring an actual infrastructure choice and verification.
+- **Verification to complete in the real repository:** run the local test suite, confirm the Docker build and five-service Compose stack, perform an end-to-end article test, validate the two failure-recovery drills, and inspect a successful GitHub Actions run. This generated README does not imply those checks have already been executed on your Windows machine.
 
 ## Design principles
 
