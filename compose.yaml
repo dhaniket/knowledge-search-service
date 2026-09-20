@@ -1,0 +1,96 @@
+name: knowledge-search
+
+x-app-common: &app-common
+  image: knowledge-search:day8
+  build: .
+  env_file:
+    - .env
+  init: true
+  restart: unless-stopped
+
+services:
+
+  api:
+    <<: *app-common
+
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+
+  outbox:
+    <<: *app-common
+
+    command:
+      - python
+      - -m
+      - app.workers.outbox_dispatcher
+
+    environment:
+      KAFKA_CA_FILE: /run/certs/ca.pem
+
+    volumes:
+      - ./certs/ca.pem:/run/certs/ca.pem:ro
+
+
+  index-worker:
+    <<: *app-common
+
+    command:
+      - python
+      - -m
+      - app.workers.article_index_worker
+
+
+  audit:
+    <<: *app-common
+
+    command:
+      - python
+      - -m
+      - app.workers.article_event_consumer
+      - --role
+      - audit
+
+    environment:
+      KAFKA_CA_FILE: /run/certs/ca.pem
+
+    volumes:
+      - ./certs/ca.pem:/run/certs/ca.pem:ro
+
+
+  analytics:
+    <<: *app-common
+
+    command:
+      - python
+      - -m
+      - app.workers.article_event_consumer
+      - --role
+      - analytics
+
+    environment:
+      KAFKA_CA_FILE: /run/certs/ca.pem
+
+    volumes:
+      - ./certs/ca.pem:/run/certs/ca.pem:ro
