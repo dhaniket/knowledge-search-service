@@ -11,6 +11,7 @@ from app.models.article import (
 from app.schemas.article import (
     ArticleCreate,
 )
+from app.messaging.outbox import new_outbox_state
 
 
 class ArticleRepository:
@@ -54,6 +55,7 @@ class ArticleRepository:
             "created_at": now,
             "updated_at": now,
         }
+        document["outbox"] = new_outbox_state()
         result = await self.collection.insert_one(document)
 
         document["_id"] = result.inserted_id

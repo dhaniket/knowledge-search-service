@@ -5,7 +5,8 @@ from datetime import (
 from typing import Literal
 from uuid import (
     UUID,
-    uuid4,
+    NAMESPACE_URL,
+    uuid5,
 )
 
 from pydantic import (
@@ -35,7 +36,10 @@ class ArticleIndexJob(BaseModel):
     ) -> "ArticleIndexJob":
 
         return cls(
-            job_id=uuid4(),
+            job_id=uuid5(
+                NAMESPACE_URL,
+                f"knowledge-search/article.index.v1/{article_id}",
+            ),
             job_type=("article.index.requested"),
             version=1,
             article_id=article_id,

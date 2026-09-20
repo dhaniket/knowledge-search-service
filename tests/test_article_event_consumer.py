@@ -146,3 +146,83 @@ async def test_replaying_event_does_not_duplicate_record(
     # The replay was safely processed;
     # both executions committed progress.
     assert len(consumer.commits) == 2
+
+
+@pytest.mark.anyio
+async def test_invalid_event_is_saved_before_commit(
+    article,
+):
+
+    sequence = []
+
+    class FakePoisonCollection:
+
+        async def update_one(
+            self,
+            filter,
+            update,
+            upsert,
+        ):
+            sequence.append("poison_saved")
+
+    collection = FakeCollection(sequence)
+
+    collection.database = {"kafka_poison_events": FakePoisonCollection()}
+
+    consumer = FakeConsumer(sequence)
+
+    record = make_record(article)
+    record.value = b"{invalid-json"
+
+    await process_record(
+        consumer,
+        collection,
+        record,
+    )
+
+    assert sequence == [
+        "poison_saved",
+        "commit",
+    ]
+
+    assert len(consumer.commits) == 1
+
+
+@pytest.mark.anyio
+async def test_poison_storage_failure_does_not_commit(
+    article,
+):
+
+    sequence = []
+
+    class BrokenPoisonCollection:
+
+        async def update_one(
+            self,
+            filter,
+            update,
+            upsert,
+        ):
+            sequence.append("poison_write_failed")
+
+            raise RuntimeError("MongoDB unavailable")
+
+    collection = FakeCollection(sequence)
+
+    collection.database = {"kafka_poison_events": BrokenPoisonCollection()}
+
+    consumer = FakeConsumer(sequence)
+
+    record = make_record(article)
+    record.value = b"{invalid-json"
+
+    with pytest.raises(RuntimeError):
+        await process_record(
+            consumer,
+            collection,
+            record,
+        )
+
+    assert sequence == ["poison_write_failed"]
+
+    assert consumer.commits == []

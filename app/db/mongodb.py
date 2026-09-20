@@ -92,3 +92,17 @@ async def close_mongodb() -> None:
     await _mongodb_client.close()
 
     _mongodb_client = None
+
+
+async def ensure_outbox_indexes() -> None:
+    collection = get_database()["articles"]
+
+    for channel in ("rabbitmq", "kafka"):
+        await collection.create_index(
+            [
+                (f"outbox.{channel}.status", 1),
+                (f"outbox.{channel}.next_attempt_at", 1),
+                (f"outbox.{channel}.lease_until", 1),
+            ],
+            name=f"outbox_{channel}_claim_idx",
+        )

@@ -24,16 +24,6 @@ from app.search.elasticsearch import (
     close_elasticsearch,
     initialize_elasticsearch,
 )
-from app.messaging.rabbitmq import (
-    close_rabbitmq,
-    initialize_rabbitmq,
-)
-import os
-
-from app.messaging.kafka import (
-    initialize_kafka,
-    close_kafka,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -47,31 +37,6 @@ async def lifespan(
     await initialize_mongodb()
 
     await ensure_mongodb_indexes()
-
-    try:
-
-        await initialize_rabbitmq()
-
-    except Exception:
-
-        logger.warning(
-            "RabbitMQ unavailable " "during startup",
-            exc_info=True,
-        )
-
-    if os.getenv("KAFKA_BOOTSTRAP_SERVERS"):
-        try:
-            await initialize_kafka()
-
-            logger.info("Kafka producer initialized")
-
-        except Exception:
-            logger.warning(
-                "Kafka unavailable during startup",
-                exc_info=True,
-            )
-    else:
-        logger.info("Kafka not configured; event publishing disabled")
 
     # Elasticsearch is optional
     # for article CRUD.
@@ -104,8 +69,6 @@ async def lifespan(
         yield
 
     finally:
-        await close_kafka()
-        await close_rabbitmq()
 
         await close_redis()
 

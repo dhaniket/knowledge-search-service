@@ -19,6 +19,11 @@ from app.messaging.kafka import (
 from app.messaging.article_created_event import (
     ArticleCreatedEvent,
 )
+import base64
+
+from datetime import UTC, datetime
+
+from pydantic import ValidationError
 
 logging.basicConfig(level=logging.INFO)
 
@@ -41,13 +46,59 @@ async def process_record(
     collection,
     message,
 ) -> None:
+    try:
+        event = ArticleCreatedEvent.model_validate_json(message.value)
 
-    # Invalid events must not silently advance
-    # the consumer offset.
-    event = ArticleCreatedEvent.model_validate_json(message.value)
+        if message.key != event.article_id.encode("utf-8"):
+            raise ValueError("Kafka key does not match article ID")
 
-    if message.key != event.article_id.encode("utf-8"):
-        raise ValueError("Kafka message key does not match article ID")
+    except (ValidationError, ValueError) as exc:
+
+        poison_collection = collection.database["kafka_poison_events"]
+
+        poison_id = f"{message.topic}:" f"{message.partition}:" f"{message.offset}"
+
+        await poison_collection.update_one(
+            {
+                "_id": poison_id,
+            },
+            {
+                "$setOnInsert": {
+                    "topic": message.topic,
+                    "partition": message.partition,
+                    "offset": message.offset,
+                    "key_base64": (
+                        base64.b64encode(message.key or b"").decode("ascii")
+                    ),
+                    "value_base64": (
+                        base64.b64encode(message.value or b"").decode("ascii")
+                    ),
+                    "error": str(exc)[:1000],
+                    "recorded_at": datetime.now(UTC),
+                }
+            },
+            upsert=True,
+        )
+
+        # Poison record was persisted successfully.
+        # The consumer can now move past this offset.
+        partition = TopicPartition(
+            message.topic,
+            message.partition,
+        )
+
+        await consumer.commit(
+            {
+                partition: message.offset + 1,
+            }
+        )
+
+        logger.error(
+            "Invalid Kafka event stored for review: %s",
+            poison_id,
+        )
+
+        return
 
     # MongoDB _id is unique.
     # Replaying the same logical event does not
