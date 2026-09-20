@@ -4,3 +4,7 @@ class MessagePublishError(Exception):
 
 class ArticleMissingForIndexing(Exception):
     pass
+
+
+class KafkaEventPublishError(Exception):
+    pass

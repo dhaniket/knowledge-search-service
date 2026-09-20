@@ -54,7 +54,6 @@ class ArticleRepository:
             "created_at": now,
             "updated_at": now,
         }
-
         result = await self.collection.insert_one(document)
 
         document["_id"] = result.inserted_id

@@ -40,6 +40,33 @@ from app.messaging.rabbitmq import (
 from app.messaging.article_index_job_publisher import (
     ArticleIndexJobPublisher,
 )
+from app.messaging.kafka import (
+    get_kafka_producer,
+    get_article_event_topic,
+)
+from app.messaging.article_event_publisher import (
+    ArticleEventPublisher,
+)
+
+
+async def get_optional_article_event_publisher() -> ArticleEventPublisher | None:
+
+    try:
+        producer = get_kafka_producer()
+
+    except RuntimeError:
+        return None
+
+    return ArticleEventPublisher(
+        producer=producer,
+        topic=get_article_event_topic(),
+    )
+
+
+OptionalArticleEventPublisherDep = Annotated[
+    ArticleEventPublisher | None,
+    Depends(get_optional_article_event_publisher),
+]
 
 
 async def get_optional_article_index_job_publisher() -> ArticleIndexJobPublisher | None:
@@ -124,11 +151,13 @@ ArticleRepositoryDep = Annotated[
 async def get_article_service(
     article_repository: ArticleRepositoryDep,
     index_job_publisher: OptionalArticleIndexJobPublisherDep,
+    event_publisher: OptionalArticleEventPublisherDep,
 ) -> ArticleService:
 
     return ArticleService(
-        article_repository=(article_repository),
-        index_job_publisher=(index_job_publisher),
+        article_repository=article_repository,
+        index_job_publisher=index_job_publisher,
+        event_publisher=event_publisher,
     )
 
 
