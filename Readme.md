@@ -1,8 +1,8 @@
 # Knowledge Search Service
 
-An asynchronous knowledge-base backend built with FastAPI, MongoDB Atlas, Elasticsearch, Redis, RabbitMQ, and Apache Kafka (Aiven Free). It demonstrates full-text search and caching, recoverable messaging, independent event consumers, and repeatable local deployment using Docker Compose, with automated checks using GitHub Actions.
+An asynchronous knowledge-base backend built with FastAPI, MongoDB Atlas, Elasticsearch, Redis, RabbitMQ, and Apache Kafka (Aiven Free). It demonstrates full-text search, caching, recoverable messaging, independent event consumers, Docker-based local deployment, GitHub Actions CI, and local Kubernetes orchestration.
 
-> **Implementation and verification note:** This README documents the application design and the container/CI configuration introduced for the project. It was prepared from the project documentation and planned changes, not from a checkout of your current Windows repository. Confirm that the outbox refactor, Docker files, tests, and GitHub Actions workflow are present and passing before describing this project as deployed or fully verified.
+> **Deployment scope:** local Python, Docker Compose, and a local Kubernetes cluster (kind). Public-cloud hosting, a public IP, HTTPS ingress, and automatic production deployment are deferred. Commands and expected results below are operational documentation, not independently captured test results.
 
 ## Architecture
 
@@ -26,35 +26,6 @@ Client → FastAPI → ArticleService → MongoDB Atlas (knowledge_app)
 **Source of truth:** MongoDB articles. **Derived systems:** Elasticsearch full-text index and Redis search cache. RabbitMQ carries an `article.index.requested` work command. Kafka carries an `article.created` domain event.
 
 An article and its two pending publication records are written in **one MongoDB document insert**. The API returns `201 Created` after the authoritative write. A separate dispatcher publishes both deliveries and marks each as published only after its broker confirms acceptance.
-
-## Runtime and deployment overview
-
-The same Python codebase runs as five independent processes. Docker builds **one image**, and Compose starts five containers from it with different commands. The databases and brokers remain managed externally; Compose does not start or migrate them.
-
-```text
-                      developer pushes code
-                              |
-                              v
-                     GitHub Actions CI
-                  lint -> pytest -> image build
-                              |
-                validated image definition
-                              |
-                              v
-                    Docker Compose (local)
-       +------------+------------+------------+
-       |            |            |            |
-       v            v            v            v
-      API         outbox     index worker   Kafka consumers
-                               RabbitMQ     audit / analytics
-       |            |            |            |
-       +------------+------------+------------+
-                              |
-        MongoDB Atlas / Elastic Cloud / Redis Cloud
-                 RabbitMQ / Aiven Kafka
-```
-
-**Why separate containers?** The API can answer requests while the dispatcher or a consumer is offline. Each process has its own lifecycle and logs. Docker standardizes execution; the MongoDB outbox and broker acknowledgements—not Docker—provide messaging recovery. The compose file defines a local runtime, **not an internet-facing production deployment**.
 
 ## Technologies
 
@@ -203,38 +174,74 @@ python -m scripts.rebuild_search_index
 
 Keep `rebuild_search_index` for repairs; it is not an everyday message-processing step.
 
-## Run using Docker Compose (recommended for local integration)
 
-### Prerequisites and the reason for each
+## Runtime and deployment overview
 
-- Docker Desktop running in **Linux container** mode (WSL2 backend on Windows); provides the Linux container runtime.
-- `Dockerfile`, `compose.yaml`, `requirements.txt`, and `.dockerignore` at the repository root; define the packaged code and multi-process runtime.
-- A local `.env` populated with valid **development** credentials; Compose injects it at runtime and it must not be committed or copied into the image.
-- `certs/ca.pem`, downloaded from the Aiven service; required for TLS certificate verification by the Kafka dispatcher and consumers.
-- Existing reachable managed MongoDB, Elasticsearch, Redis, RabbitMQ, and Aiven Kafka services. MongoDB must be accessible from Docker's network, and Aiven's free Kafka service may need to be powered on.
-- A passing local Python test baseline. Containerization does not fix application bugs.
+The codebase has **five independently managed application processes**. One Docker image is reused with different commands. MongoDB, Elasticsearch, Redis, RabbitMQ and Kafka remain externally managed; neither Compose nor kind creates those services.
 
-The Docker configuration is designed as follows:
+```text
+                      GitHub push / pull request
+                                |
+                          GitHub Actions
+                   lint -> pytest -> Docker build
+                                |
+                    versioned application image
+                         /             \
+                        v               v
+               Docker Compose        Local kind
+                 five containers     Kubernetes cluster
+                                        |
+                              Service -> API Pod(s)
+                                        |
+                 outbox / indexing / audit / analytics Pods
+                         \              /
+                          managed services
+```
 
-| File | Purpose | Important decision |
-|---|---|---|
-| `Dockerfile` | Builds a Python 3.13 Linux image, installs dependencies, copies `app/` and `scripts/` | Runs as non-root `appuser`; default process is Uvicorn. |
-| `.dockerignore` | Removes unnecessary/sensitive files from the build context | Excludes `.env`, `certs/`, `.venv/`, `.git/`, `tests/`, `.ruff_cache/`. |
-| `compose.yaml` | Declares five application services and their startup commands | Reuses one image; exposes the API only at `127.0.0.1:8000`. |
-| `.env` | Supplies managed-service connection details at container runtime | Never embed it in the image or commit it. |
-| `certs/ca.pem` | Trust certificate for Aiven Kafka TLS | Mounted read-only into Kafka-enabled containers. |
+The API writes article data and publication intent atomically in MongoDB. The outbox dispatcher independently publishes to RabbitMQ and Kafka; consumers record their own work. Docker and Kubernetes run these processes but **do not replace the application's message durability and idempotency mechanisms**.
 
-The image should use one logical Dockerfile `CMD` instruction:
+### Technology and responsibility map
+
+| Component | Responsibility |
+|---|---|
+| FastAPI | HTTP contract, input validation, dependency injection |
+| MongoDB Atlas (`knowledge_app`) | Authoritative articles and embedded outbox |
+| Elasticsearch | Rebuildable full-text index |
+| Redis | Disposable search cache with TTL |
+| RabbitMQ | Indexing work queue, retries and dead-letter inspection |
+| Kafka (Aiven Free) | Retained domain events for independent audit/analytics groups |
+| Docker | Reproducible Linux application image |
+| Docker Compose | Five-process local integration environment |
+| Kubernetes (kind) | Pod scheduling, desired replicas, service discovery and rollouts |
+| GitHub Actions | Test/lint/build checks; **no production deployment** |
+
+---
+
+## Docker Compose: local integration
+
+**Why Compose?** Five separate terminal processes are difficult to reproduce. Compose starts all five containers using one image, explicit startup commands and shared runtime configuration; it does not host or migrate external infrastructure.
+
+Prerequisites: Docker Desktop in Linux-container mode; `Dockerfile`, `compose.yaml`, `requirements.txt`, `.dockerignore`; the ignored `.env`; Aiven CA file `certs/ca.pem`; reachable managed services. Stop duplicate Windows-native processes before starting the stack.
+
+| Local file | Purpose |
+|---|---|
+| `Dockerfile` | Python 3.13 Linux image; installs dependencies; copies `app/` and `scripts/`; runs as a non-root user. |
+| `.dockerignore` | Excludes `.env`, `certs/`, `.venv/`, `.git/`, tests and temporary files from image build context. |
+| `compose.yaml` | API, outbox, index-worker, audit and analytics services; one shared image. |
+| `.env` | Injected into containers at runtime; never added to the image or Git. |
+| `certs/ca.pem` | Aiven CA mounted read-only into Kafka-enabled containers. |
+
+The Dockerfile's default process should use a **single valid exec-form instruction**:
 
 ```dockerfile
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
-**Why `0.0.0.0` here?** It lets the application accept traffic through Docker's port mapping *inside* the container. Compose should publish only `127.0.0.1:8000:8000` on the Windows host, so the development API is not deliberately exposed to your LAN.
+Uvicorn must listen on `0.0.0.0` **inside** the container for Docker networking to reach it; Compose should publish only `127.0.0.1:8000:8000` on the Windows host. This does not create a publicly reachable API.
 
-### Certificate path: Windows versus Linux
+### Kafka certificate: why a mount is required
 
-The Windows `.env` path `KAFKA_CA_FILE=certs/ca.pem` does not exist automatically inside a Linux container. In `compose.yaml`, the **outbox**, **audit**, and **analytics** services mount the local certificate and override that path:
+Windows stores `certs/ca.pem` in the project folder. That file does not automatically exist in Linux containers. In the **outbox**, **audit**, and **analytics** services, Compose mounts it read-only and overrides the container's path:
 
 ```yaml
 environment:
@@ -243,16 +250,19 @@ volumes:
   - ./certs/ca.pem:/run/certs/ca.pem:ro
 ```
 
-The `:ro` suffix means the container cannot write to this file. Neither the certificate directory nor `.env` should be copied into the image. In PowerShell, verify that `Test-Path .\certs\ca.pem` returns `True`. Use the SASL host and port supplied by Aiven, not an HTTPS URL. Do not disable certificate verification to bypass TLS errors.
-
-### Starting the stack
-
-Run these commands **from the repository root in Windows PowerShell**, after stopping the five equivalent Python processes that you previously started manually:
+Check the host file first:
 
 ```powershell
-docker --version
-docker compose version
 Test-Path .\certs\ca.pem
+```
+
+Do not disable TLS certificate verification to work around a missing or incorrect CA file.
+
+### Start and verify
+
+In PowerShell, at the repository root:
+
+```powershell
 pytest -v
 docker compose config -q
 docker compose up -d --build
@@ -260,130 +270,81 @@ docker compose ps
 Invoke-RestMethod http://127.0.0.1:8000/health
 ```
 
-`config -q` validates Compose without printing resolved configuration; avoid sharing the unredacted output of `docker compose config`, which can contain secrets. `up -d --build` builds the shared image and starts the services in the background. Swagger UI: <http://127.0.0.1:8000/docs>.
+`config -q` validates without dumping resolved environment values. Avoid publicly sharing ordinary `docker compose config` output because it can reveal secrets.
 
-| Compose service | Entrypoint | Responsibility |
+| Compose service | Startup command | Function |
 |---|---|---|
-| `api` | `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000` | Accept requests and atomically save articles with publication intent. |
-| `outbox` | `python -m app.workers.outbox_dispatcher` | Read pending delivery records, publish to both brokers and mark confirmed deliveries. |
-| `index-worker` | `python -m app.workers.article_index_worker` | Consume RabbitMQ jobs, index Elasticsearch, invalidate Redis, ACK. |
-| `audit` | `python -m app.workers.article_event_consumer --role audit` | Process Kafka events for `knowledge-audit-v1`. |
-| `analytics` | `python -m app.workers.article_event_consumer --role analytics` | Process Kafka events for `knowledge-analytics-v1`. |
+| `api` | `python -m uvicorn app.main:app --host 0.0.0.0 --port 8000` | HTTP and atomic article/outbox insert |
+| `outbox` | `python -m app.workers.outbox_dispatcher` | Broker publication and outbox updates |
+| `index-worker` | `python -m app.workers.article_index_worker` | RabbitMQ indexing, Redis invalidation and ACK |
+| `audit` | `python -m app.workers.article_event_consumer --role audit` | Kafka audit group |
+| `analytics` | `python -m app.workers.article_event_consumer --role analytics` | Kafka analytics group |
 
-The API's `/health` is a **liveness** check, not evidence that all five external services or background consumers are healthy. `docker compose ps` and the logs must also be inspected. Once containers are running, create a test article using Swagger; check both outbox statuses, Elasticsearch indexing, and the two Kafka-backed MongoDB event collections.
+Swagger: <http://127.0.0.1:8000/docs>. A successful `/health` checks API liveness, **not** broker availability, search readiness or worker progress. Create an article and verify the full outbox/consumer flow separately.
 
-### Common operating commands
+Useful commands:
 
 ```powershell
-# Status and recent logs
-docker compose ps
 docker compose logs --tail=50 outbox
 docker compose logs -f audit
-
-# Execute administrative scripts *inside* an existing service
 docker compose exec outbox python -m scripts.check_outbox
 docker compose exec analytics python -m scripts.show_article_analytics
 
-# Practice process failure and recovery
+# Confirm pending publication survives process downtime.
 docker compose stop outbox
-# POST an article now: its outbox entries should stay pending.
+# Create an article: publication intent should remain pending.
 docker compose start outbox
-# It should publish the backlog after it starts.
 
-# Rebuild after changing application code
+# Source changes are baked into the image; rebuild rather than restart only.
 docker compose up -d --build
 
-# Stop/remove only Compose-managed local application containers
+# Remove only this local Compose stack.
 docker compose down
 ```
 
-Stopping a consumer does not stop the API. Stopping the dispatcher does not erase MongoDB outbox records. Stopping the RabbitMQ **worker** does not make the RabbitMQ broker unavailable: queued work can be consumed after restart. `docker compose down` does not delete the externally hosted database/broker data.
+`docker compose down` does not delete the externally managed databases or broker data.
 
-### Linux inspection inside a container
+### Linux inspection and troubleshooting
 
 ```powershell
 docker compose exec api sh
 ```
 
-Inside the shell:
+Inside the container, use `pwd` (expected `/app`), `ls -la`, `id` (non-root runtime user), `python --version`, then `exit`. Minimal images may omit `bash`, `curl` and `ps`; use `sh`, Python and container logs.
 
-```sh
-pwd                 # expected: /app
-ls -la
-id                  # should be non-root appuser
-python --version
-ls app
-exit
-```
-
-To inspect the Aiven CA from the audit container:
-
-```powershell
-docker compose exec audit sh -c "ls -l /run/certs/ca.pem"
-```
-
-The application image is intentionally slim: commands such as `bash`, `curl`, or `ps` may be absent. Prefer `sh`, built-in Python checks, and `docker compose logs`. `docker compose restart` restarts the **existing image**; when code or dependency files change, rebuild with `docker compose up -d --build`.
-
-### Docker troubleshooting
-
-| Symptom | Diagnosis |
+| Symptom | Check first |
 |---|---|
-| Cannot connect to Docker daemon | Start Docker Desktop; confirm Linux containers/WSL2. |
-| Port 8000 already allocated | Stop the previous Windows Uvicorn process. |
-| Image build fails in `pip install` | Verify `requirements.txt` is complete and Linux-compatible. |
-| Kafka certificate missing | Check host `certs/ca.pem`, read-only mount, and container `KAFKA_CA_FILE`. |
-| Broker connection errors | Inspect `.env` values, Aiven service state, network access and TLS settings. |
-| API health OK but indexing missing | Inspect dispatcher and index-worker logs plus outbox backlog. |
-| Code changes not reflected | Rebuild the image; do not only restart the container. |
+| Docker daemon unavailable | Docker Desktop, Linux containers and WSL2 |
+| Port 8000 unavailable | Stop the previous Uvicorn/Compose instance |
+| Build fails on dependencies | Linux compatibility and completeness of `requirements.txt` |
+| Kafka CA missing | Host file, bind mount and `KAFKA_CA_FILE` |
+| API responds but article is not indexed | Dispatcher backlog, RabbitMQ worker and Elasticsearch logs |
+| Source changes not visible | Rebuild the image (`up -d --build`) |
 
 ---
 
 ## Continuous integration: GitHub Actions
 
-`.github/workflows/ci.yml` defines an intended Linux CI pipeline for pushes, pull requests, and manual runs:
+**Why CI?** A local `pytest` run can be forgotten or pass only because of an individual's machine. `.github/workflows/ci.yml` should validate pushes and pull requests on a clean Linux runner:
 
 ```text
-push / pull request / manual dispatch
-               |
-               v
-      checkout repository
-               |
-               v
-    set up Python 3.13
-               |
-               v
- install dependencies + Ruff
-               |
-               v
- compileall + focused Ruff checks
-               |
-               v
-           pytest -v
-               |
-       +-------+-------+
-       |               |
-       v               v
-    tests fail       tests pass
-    stop build           |
-                         v
-                   Docker build
+push / pull request / manual trigger
+                   |
+             checkout code
+                   |
+       Python 3.13 + dependencies
+                   |
+      compileall -> Ruff -> pytest
+                   |
+            tests pass?
+          no /      \ yes
+        fail       Docker image build
                    (push: false)
 ```
 
-**Why:** Manual local tests can be forgotten. The CI test job catches code failures on a clean Linux runner; `needs: test` prevents the image-build job from starting when the tests fail. The Docker job checks that an image can be built but does **not** push it to a registry or deploy it. This is CI and a delivery foundation, **not continuous deployment**.
+The Docker build job should depend on the test job using `needs: test`. Keep token permissions minimal (`contents: read`), run tests using fakes without cloud credentials, and **do not** configure registry publishing or deployment in this workflow until there is a real deployment target.
 
-The workflow should do the following:
-
-- Give its default GitHub token only `contents: read` permission.
-- Install dependencies from `requirements.txt` and explicitly install missing developer tools such as `pytest` and `ruff` if they are not in that file.
-- Run `python -m compileall -q app scripts tests`.
-- Run `ruff check app scripts tests --select E4,E7,E9,F63,F7,F82` as an initial focused correctness gate.
-- Run `pytest -v` with fake repositories/brokers; tests should not require live cloud credentials.
-- Build an image using Docker Buildx with `push: false`, after the tests pass.
-
-GitHub Action versions and build configuration live in the actual `.github/workflows/ci.yml`; review that file before a public push. A green workflow proves only its configured checks—not production readiness, external-service health, or successful deployment.
-
-### Local checks matching CI
+Local equivalents:
 
 ```powershell
 python -m compileall -q app scripts tests
@@ -393,7 +354,230 @@ docker compose config -q
 docker compose build
 ```
 
-Inspect **GitHub repository → Actions → Backend CI** after pushing. Confirm that both the tests and the Docker-build job actually succeeded; don't claim CI is passing solely because the YAML file exists. No managed-service secrets are needed for fake-based unit tests.
+Install `pytest` and `ruff` in CI explicitly if they are not already included in `requirements.txt`. Inspect the actual GitHub Actions run before calling CI green. This setup is **CI and a delivery foundation, not continuous deployment**.
+
+---
+
+## Local Kubernetes (kind)
+
+**Scope:** Kubernetes runs on the developer's computer, backed by Docker. It is **not** public-cloud hosting. The cluster has one local node; multiple API Pods can recover from *Pod* failure but **not** from losing that sole node or the laptop.
+
+### Why Kubernetes when Compose already works?
+
+Compose runs the fixed five-process stack. Kubernetes adds declarative desired state, Pod replacement, service discovery, scaling, readiness-gated endpoints and rollout/rollback mechanics. These are **operational** capabilities, not substitutes for the outbox, broker ACKs, consumer offsets or business-level idempotency.
+
+| Kubernetes object | Why it exists here |
+|---|---|
+| Namespace `knowledge` | Groups the application's cluster resources |
+| Secret `knowledge-env` | Supplies runtime environment configuration without embedding credentials in YAML |
+| Secret `aiven-ca` | Mounts the Kafka CA in the correct Linux path |
+| Deployment `knowledge-api` | Keeps API Pods available and controls rolling updates |
+| Service `knowledge-api` (`ClusterIP`) | Gives ready API Pods a stable internal address |
+| Four worker Deployments | Independently restart outbox, indexing, audit and analytics processes |
+| EndpointSlices | Describe ready Service backends after scaling |
+| Optional HPA | CPU-based autoscaling **only if** a working metrics pipeline has been configured and tested |
+
+The API uses HTTP startup/readiness/liveness probes at `/health`. This route reports **basic process liveness**, not end-to-end dependency readiness. Workers do not expose equivalent progress probes: inspect logs and outbox/consumer progress when diagnosing stalls.
+
+### Files
+
+```text
+k8s/
+├── kind-config.yaml       # One local control-plane node
+├── api.yaml               # API Deployment + internal ClusterIP Service
+├── workers.yaml           # Four worker Deployments
+└── api-hpa.yaml           # Optional; do not apply unless tested
+```
+
+Cloud-only manifests, a container registry release and a public Ingress are **not** prerequisites and are intentionally outside the active deployment scope.
+
+### Create the cluster and load the image
+
+Prerequisites: Docker Desktop running, `kind` and `kubectl` installed, and valid local `.env` and `certs/ca.pem` files.
+
+```powershell
+# Stop the equivalent Compose processes to avoid duplicate consumers
+# and a conflicting port-forward.
+docker compose down
+
+kind create cluster --name knowledge-dev --config k8s/kind-config.yaml --wait 120s
+kubectl config current-context
+kubectl get nodes
+
+docker build -t knowledge-search:day9-v1 .
+kind load docker-image knowledge-search:day9-v1 --name knowledge-dev
+```
+
+Expect context `kind-knowledge-dev` and a Ready node. The manifests use `knowledge-search:day9-v1` and `imagePullPolicy: IfNotPresent` because the image is loaded directly into kind; no external registry is required.
+
+### Create runtime configuration
+
+**Why:** Pods have a different filesystem from Windows; they cannot see the local `.env` or CA certificate unless Kubernetes supplies them. The YAML references Secret names, not credential contents.
+
+```powershell
+kubectl create namespace knowledge
+kubectl create secret generic knowledge-env --from-env-file=.env -n knowledge
+kubectl create secret generic aiven-ca --from-file=ca.pem=certs/ca.pem -n knowledge
+kubectl get secrets -n knowledge
+```
+
+If the namespace or Secrets already exist, inspect them rather than recreating them blindly. Kafka-enabled Pods mount the certificate read-only at `/run/certs/ca.pem` and set `KAFKA_CA_FILE` to that container path.
+
+Kubernetes Secrets are **not automatically a production secrets manager**: authorized cluster users can access them, and production use needs appropriate RBAC/encryption and rotation.
+
+### Deploy and inspect
+
+```powershell
+kubectl apply --dry-run=client -f k8s/api.yaml
+kubectl apply --dry-run=client -f k8s/workers.yaml
+
+kubectl apply -f k8s/api.yaml
+kubectl apply -f k8s/workers.yaml
+
+kubectl get deployments -n knowledge
+kubectl get pods -n knowledge
+kubectl get service knowledge-api -n knowledge
+kubectl rollout status deployment/knowledge-api -n knowledge --timeout=120s
+```
+
+Expected: API, outbox, index-worker, audit and analytics each have one available replica. Diagnose failures with `kubectl describe pod -n knowledge <POD_NAME>` and `kubectl logs deployment/knowledge-outbox -n knowledge --tail=100`, not by guessing at application changes.
+
+### Access the API and verify the message flow
+
+Keep a separate terminal open:
+
+```powershell
+kubectl port-forward -n knowledge service/knowledge-api 8000:8000
+```
+
+Then access <http://127.0.0.1:8000/docs> or check:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+Create a test article and verify all independent effects:
+
+```text
+POST article -> MongoDB article + pending outbox (atomic)
+                    |
+                dispatcher
+                  /      \
+           RabbitMQ      Kafka
+              |          /   \
+         Elasticsearch audit analytics
+              |
+        Redis invalidation
+```
+
+```powershell
+kubectl exec -n knowledge deployment/knowledge-outbox -- python -m scripts.check_outbox
+kubectl logs deployment/knowledge-outbox -n knowledge --tail=50
+kubectl logs deployment/knowledge-index-worker -n knowledge --tail=50
+kubectl logs deployment/knowledge-audit -n knowledge --tail=50
+kubectl logs deployment/knowledge-analytics -n knowledge --tail=50
+```
+
+Check the actual article's Elasticsearch document and the two MongoDB event collections. An outbox status of `published` does not by itself prove consumption.
+
+### Horizontal scaling and Service routing
+
+**Problem:** One API Pod may become a throughput bottleneck. **Change:** Increase only the API replica count while keeping the stateful dependencies and background workers unchanged.
+
+```powershell
+kubectl scale deployment/knowledge-api --replicas=3 -n knowledge
+kubectl rollout status deployment/knowledge-api -n knowledge --timeout=120s
+kubectl get pods -n knowledge -l app=knowledge-api -o wide
+kubectl get endpointslices -n knowledge -l kubernetes.io/service-name=knowledge-api -o wide
+```
+
+Expect three Ready API Pods listed as eligible Service backends. A `ClusterIP` routes traffic to them via the Service; **it does not promise equal round-robin distribution**. `kubectl port-forward service/...` is a diagnostic tunnel and is **not** reliable proof of per-request balancing across every Pod.
+
+For an in-cluster request test:
+
+```powershell
+kubectl exec -n knowledge deployment/knowledge-api -- python -c "import urllib.request; [urllib.request.urlopen('http://knowledge-api:8000/docs').read() for _ in range(30)]; print('30 requests sent')"
+kubectl logs -n knowledge -l app=knowledge-api --prefix=true --tail=100 --max-log-requests=10
+```
+
+The shared MongoDB and Elasticsearch services may become bottlenecks even if API Pods scale successfully.
+
+### Self-healing demonstration
+
+**Problem:** A Pod can crash or disappear. **Change:** Delete one Pod while the Deployment's desired replica count remains three.
+
+```powershell
+$pod = kubectl get pods -n knowledge -l app=knowledge-api -o jsonpath='{.items[0].metadata.name}'
+kubectl delete pod $pod -n knowledge
+kubectl get pods -n knowledge -l app=knowledge-api -w
+```
+
+Kubernetes should recreate a replacement until three Pods are Ready. This tests **Pod-level** recovery, not survival of node/laptop failure.
+
+### Rolling update and rollback
+
+**Problem:** Deleting all API instances for a release can interrupt service. **Change:** A RollingUpdate with `maxSurge: 1`, `maxUnavailable: 0` and readiness checks replaces Pods incrementally, subject to available resources.
+
+Build or tag and load a versioned image:
+
+```powershell
+docker tag knowledge-search:day9-v1 knowledge-search:day9-v2
+kind load docker-image knowledge-search:day9-v2 --name knowledge-dev
+kubectl set image deployment/knowledge-api api=knowledge-search:day9-v2 -n knowledge
+kubectl rollout status deployment/knowledge-api -n knowledge --timeout=180s
+kubectl rollout history deployment/knowledge-api -n knowledge
+```
+
+This `v2` tag points to identical application code if produced with `docker tag`; the exercise demonstrates **rollout mechanics, not a new software feature**.
+
+Rollback:
+
+```powershell
+kubectl rollout undo deployment/knowledge-api -n knowledge
+kubectl rollout status deployment/knowledge-api -n knowledge --timeout=180s
+kubectl get deployment knowledge-api -n knowledge -o jsonpath='{.spec.template.spec.containers[0].image}'
+```
+
+Expect `knowledge-search:day9-v1`. A failed rollout can stall; Kubernetes does not automatically promise to undo it. For real releases, update the image reference in version-controlled YAML so future `kubectl apply` operations agree with the intended release.
+
+### Autoscaling: optional and not assumed to be enabled
+
+The sample `k8s/api-hpa.yaml`, if present, uses `autoscaling/v2` with a CPU utilization target. CPU-based HPA requires a working metrics API and CPU requests. Check `kubectl top nodes` first. If metrics are unavailable, **do not claim HPA works**. Once HPA manages replicas, avoid competing manual changes or a conflicting fixed `replicas` field in the applied Deployment manifest.
+
+### Restore, troubleshoot and clean up
+
+```powershell
+# After scaling experiments:
+kubectl scale deployment/knowledge-api --replicas=1 -n knowledge
+kubectl get deployments -n knowledge
+pytest -v
+git diff --check
+git ls-files .env certs/
+```
+
+| Symptom | First checks |
+|---|---|
+| Pods `Pending` | `kubectl describe pod`; insufficient CPU/memory, missing mounts |
+| `ImagePullBackOff` | Correct local tag, `kind load` target, image pull policy |
+| `CrashLoopBackOff` | `kubectl logs --previous` and actual exception |
+| API 200 but no indexing | Dispatcher backlog, worker logs, broker state |
+| No Service backend | Pod readiness, selector labels and EndpointSlices |
+| Rollout stalled | Readiness/startup probe results, capacity and Deployment events |
+| Kafka errors | Aiven service state, SASL credentials, CA volume, broker reachability |
+
+The repo can retain Kubernetes YAML without leaving a cluster running. When finished:
+
+```powershell
+kind delete cluster --name knowledge-dev
+```
+
+This deletes the local cluster and its Secrets, but **not** data held in external MongoDB, Elasticsearch, Redis, RabbitMQ or Aiven Kafka.
+
+### Cloud deployment status
+
+**Deferred intentionally:** no OCI account or OKE/VM resources are required, and no cloud infrastructure is asserted as deployed. The project has **no public IP, public HTTPS endpoint, Ingress/Gateway controller or registry-published release** at this stage. Kubernetes concepts were exercised locally with kind; this is not a claim of multizone/high-availability cloud operation.
+
+A future cloud release needs a chosen budget/provider, registry image, outbound service networking, secure Secrets, authentication and TLS before public exposure. The present API and Swagger documentation must not be presented as a production-hardened public service.
 
 ---
 
@@ -402,7 +586,6 @@ Inspect **GitHub repository → Actions → Backend CI** after pushing. Confirm 
 ```powershell
 pytest -v
 python -m compileall -q app scripts tests
-ruff check app scripts tests --select E4,E7,E9,F63,F7,F82
 ```
 
 The unit suite uses fake repositories/brokers for service orchestration, outbox state, publishing failures, ACK ordering, retry/DLQ behavior, Kafka manual offset commits, replay, and idempotency. Verify that the actual `ArticleRepository.create()` submits **one insert** containing the article and both pending outbox records.
@@ -429,12 +612,13 @@ Recommended integration drills:
 
 The system provides **atomic publication intent** for newly created articles, not an atomic transaction spanning MongoDB, RabbitMQ and Kafka. Broker publication is at-least-once in normal recoverable failure scenarios, not exactly-once delivery. For production, add persistent supervision, oldest-pending alerts, consumer-lag monitoring, broker durability review, stronger ordering rules for update/delete events, and an incident procedure for unrecoverable failures.
 
-## Security, scope and verification status
+## Security and verification boundaries
 
-- `.gitignore` and `.dockerignore` serve different purposes: the former excludes files from Git; the latter excludes them from Docker's build context. Both should exclude `.ruff_cache/`, `.env` and `certs/` where appropriate. If a secret was previously committed, simply adding it to `.gitignore` does not remove it from Git history—revoke/rotate it and remediate the repository history separately.
-- `.env` is acceptable for this private local development setup, but environment variables are not a production secrets manager. Use platform-managed secrets and least privilege for real deployments.
-- There is no Kubernetes deployment, public cloud deployment target, container registry release or automatic production rollout documented here. Those are separate tasks requiring an actual infrastructure choice and verification.
-- **Verification to complete in the real repository:** run the local test suite, confirm the Docker build and five-service Compose stack, perform an end-to-end article test, validate the two failure-recovery drills, and inspect a successful GitHub Actions run. This generated README does not imply those checks have already been executed on your Windows machine.
+- `.gitignore` excludes local credentials from Git; `.dockerignore` excludes them from Docker build context. Neither removes secrets already committed in Git history; rotate exposed credentials and remediate history if necessary.
+- Local `.env` and Kubernetes Secrets are development conveniences, not proof of production-grade secret isolation. Restrict access, avoid printing resolved configuration, and do not commit `.env` or `certs/`.
+- `/health` is a liveness check, not a complete dependency-readiness or worker-progress guarantee.
+- The Kubernetes checklist was marked complete during project preparation, but this README is not generated from a live checkout, command output or independent cloud verification. Validate `pytest`, runtime behavior and GitHub Actions against the actual repository when publishing results.
+- No public cloud deployment, public IP, HTTPS ingress, multi-node resilience, HPA success or automated production rollout is claimed.
 
 ## Design principles
 
