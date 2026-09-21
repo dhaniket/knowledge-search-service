@@ -1,0 +1,215 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: knowledge-outbox
+  namespace: knowledge
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: knowledge-outbox
+  template:
+    metadata:
+      labels:
+        app: knowledge-outbox
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: outbox
+          image: knowledge-search:day9-v1
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - app.workers.outbox_dispatcher
+          envFrom:
+            - secretRef:
+                name: knowledge-env
+          env:
+            - name: KAFKA_CA_FILE
+              value: /run/certs/ca.pem
+          volumeMounts:
+            - name: aiven-ca
+              mountPath: /run/certs
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: aiven-ca
+          secret:
+            secretName: aiven-ca
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: knowledge-index-worker
+  namespace: knowledge
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: knowledge-index-worker
+  template:
+    metadata:
+      labels:
+        app: knowledge-index-worker
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: index-worker
+          image: knowledge-search:day9-v1
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - app.workers.article_index_worker
+          envFrom:
+            - secretRef:
+                name: knowledge-env
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: knowledge-audit
+  namespace: knowledge
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: knowledge-audit
+  template:
+    metadata:
+      labels:
+        app: knowledge-audit
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: audit
+          image: knowledge-search:day9-v1
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - app.workers.article_event_consumer
+            - --role
+            - audit
+          envFrom:
+            - secretRef:
+                name: knowledge-env
+          env:
+            - name: KAFKA_CA_FILE
+              value: /run/certs/ca.pem
+          volumeMounts:
+            - name: aiven-ca
+              mountPath: /run/certs
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: aiven-ca
+          secret:
+            secretName: aiven-ca
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: knowledge-analytics
+  namespace: knowledge
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: knowledge-analytics
+  template:
+    metadata:
+      labels:
+        app: knowledge-analytics
+    spec:
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: analytics
+          image: knowledge-search:day9-v1
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -m
+            - app.workers.article_event_consumer
+            - --role
+            - analytics
+          envFrom:
+            - secretRef:
+                name: knowledge-env
+          env:
+            - name: KAFKA_CA_FILE
+              value: /run/certs/ca.pem
+          volumeMounts:
+            - name: aiven-ca
+              mountPath: /run/certs
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: aiven-ca
+          secret:
+            secretName: aiven-ca

@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: knowledge-api
+  namespace: knowledge
+
+spec:
+  replicas: 1
+
+  revisionHistoryLimit: 3
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  selector:
+    matchLabels:
+      app: knowledge-api
+
+  template:
+    metadata:
+      labels:
+        app: knowledge-api
+
+    spec:
+      terminationGracePeriodSeconds: 30
+
+      containers:
+        - name: api
+
+          image: knowledge-search:day9-v1
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - python
+            - -m
+            - uvicorn
+            - app.main:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+
+          ports:
+            - name: http
+              containerPort: 8000
+
+          envFrom:
+            - secretRef:
+                name: knowledge-env
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+
+---
+apiVersion: v1
+kind: Service
+
+metadata:
+  name: knowledge-api
+  namespace: knowledge
+
+spec:
+  type: ClusterIP
+
+  selector:
+    app: knowledge-api
+
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP

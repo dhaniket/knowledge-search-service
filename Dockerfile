@@ -22,7 +22,7 @@ RUN useradd \
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser scripts ./scripts
 
-USER appuser
+USER 10001
 
 EXPOSE 8000
 
